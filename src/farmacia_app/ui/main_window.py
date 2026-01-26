@@ -1,57 +1,84 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QHeaderView,
-    QSizePolicy,
 )
-
-from farmacia_app.data.hardcoded import Employee, get_demo_employees, get_demo_week_schedule
-
 
 DAYS = ["L", "M", "X", "J", "V", "S", "D"]
 
-TURN_LABEL = {
-    "M": "Mañana",
-    "T": "Tarde",
-    "L": "Libre",
-    "G": "Guardia",
+# Definición única de turnos: etiqueta, horas, color fondo, color texto
+TURN_DEFS: Dict[str, Dict[str, str]] = {
+    # Mañanas escalonadas (intermedios)
+    "M1": {"label": "Mañana 08:30–14:30", "hours": "08:30–14:30", "bg": "#DDEBFF", "fg": "#1F4E79"},
+    "M2": {"label": "Mañana 09:00–14:00", "hours": "09:00–14:00", "bg": "#DFF7FF", "fg": "#0B4F6C"},
+    "M3": {"label": "Mañana 09:30–14:00", "hours": "09:30–14:00", "bg": "#E4FFF0", "fg": "#0C5A2A"},
+    "M4": {"label": "Mañana 10:00–14:30", "hours": "10:00–14:30", "bg": "#E9E4FF", "fg": "#3B2A7A"},
+    "M5": {"label": "Mañana 10:00–13:30", "hours": "10:00–13:30", "bg": "#FFF2CC", "fg": "#6B4E00"},
+    # Tarde
+    "T": {"label": "Tarde 17:00–20:30", "hours": "17:00–20:30", "bg": "#FFE6CC", "fg": "#7A3E00"},
+    # Libre / Guardia
+    "L": {"label": "Libre", "hours": "No trabaja", "bg": "#F2F2F2", "fg": "#444444"},
+    "G": {"label": "Guardia", "hours": "Pendiente de concretar", "bg": "#FFD9E6", "fg": "#7A0036"},
 }
 
-TURN_HOURS = {
-    "M": "Mañana: 08:30–14:30 (aprox.)",
-    "T": "Tarde: 17:00–20:30 (aprox.)",
-    "L": "Libre: no trabaja",
-    "G": "Guardia: pendiente de concretar (horario/compensación)",
-}
+# Orden en dropdown y leyenda
+TURN_ORDER = ["M1", "M2", "M3", "M4", "M5", "T", "L", "G"]
 
-TURN_BG = {
-    "M": "#DDEBFF",  # azul claro
-    "T": "#FFE6CC",  # naranja claro
-    "L": "#F2F2F2",  # gris claro
-    "G": "#E8D9FF",  # violeta claro
-}
 
-TURN_FG = {
-    "M": "#1F4E79",
-    "T": "#7A3E00",
-    "L": "#444444",
-    "G": "#4A2A7A",
-}
+@dataclass
+class Employee:
+    code: str
+    name: str
+
+
+Schedule = dict[str, list[str]]  # employee_code -> 7 valores (L..D)
+
+
+def get_demo_employees() -> List[Employee]:
+    return [
+        Employee(code="A", name="Encarni"),
+        Employee(code="B", name="María"),
+        Employee(code="C", name="Fátima"),
+        Employee(code="D", name="Belén"),
+        Employee(code="E", name="Thalisa"),
+        Employee(code="X", name="Dueño"),
+    ]
+
+
+def get_demo_week_schedule() -> Schedule:
+    # Demo: usamos los intermedios de mañana por persona (según vuestro patrón base)
+    # Encarni: 08:30–14:30 -> M1
+    # María : 09:00–14:00 -> M2
+    # Fátima: 09:30–14:00 -> M3 (y tardes)
+    # Belén : 10:00–13:30 -> M5 (y tardes + sábados)
+    # Thalisa:10:00–14:30 -> M4 (y 1 tarde/semana cuando no guardia)
+    return {
+        "A": ["M1", "M1", "M1", "M1", "M1", "L", "L"],
+        "B": ["M2", "M2", "M2", "M2", "M2", "L", "L"],
+        "C": ["M3", "T",  "M3", "T",  "M3", "L", "L"],  # mezcla demo
+        "D": ["M5", "T",  "M5", "T",  "M5", "T", "L"],
+        "E": ["M4", "M4", "M4", "M4", "M4", "T", "L"],
+        # Dueño demo (2 tardes libres)
+        "X": ["T",  "L",  "T",  "L",  "T",  "L", "L"],
+    }
 
 
 @dataclass
@@ -61,11 +88,38 @@ class Coverage:
     objetivo: int = 4
 
 
+class TurnDelegate(QStyledItemDelegate):
+    """Delegate para editar celdas con un combo de turnos."""
+
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        if index.column() == 0:
+            return None
+        combo = QComboBox(parent)
+        combo.addItems(TURN_ORDER)
+        combo.setEditable(False)
+        # Mostrar tooltip del item seleccionado al desplegar
+        combo.setToolTip("Elige turno")
+        return combo
+
+    def setEditorData(self, editor, index):  # type: ignore[override]
+        if editor is None:
+            return
+        value = (index.data() or "").strip().upper()
+        if value not in TURN_DEFS:
+            value = "L"
+        editor.setCurrentText(value)
+
+    def setModelData(self, editor, model, index):  # type: ignore[override]
+        if editor is None:
+            return
+        model.setData(index, editor.currentText(), Qt.EditRole)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Farmacia - Calendario semanal (demo hardcode)")
-        self.resize(1200, 700)
+        self.resize(1250, 720)
 
         self._dirty = False
         self._employees: List[Employee] = get_demo_employees()
@@ -99,7 +153,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        # Barra superior (dirty + guardar)
         header_row = QHBoxLayout()
         self.lbl_dirty = QLabel("● Cambios sin guardar")
         self.lbl_dirty.setStyleSheet("font-weight:600; color:#b00020;")
@@ -113,10 +166,8 @@ class MainWindow(QMainWindow):
         header_row.addWidget(self.btn_save)
         root.addLayout(header_row)
 
-        # Leyenda
         root.addLayout(self._build_legend())
 
-        # Tabla
         self.table = QTableWidget()
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.table.setColumnCount(1 + len(DAYS))
@@ -144,12 +195,16 @@ class MainWindow(QMainWindow):
         h.setSectionResizeMode(QHeaderView.Stretch)
         h.setStretchLastSection(True)
 
-        self.table.setColumnWidth(0, 240)
+        self.table.setColumnWidth(0, 260)
         self.table.verticalHeader().setDefaultSectionSize(34)
 
-        self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
-        self.table.itemChanged.connect(self._on_item_changed)
+        # Edición por click/doble click (combo). Sin tecleo libre.
+        self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.SelectedClicked)
 
+        self._turn_delegate = TurnDelegate(self.table)
+        self.table.setItemDelegate(self._turn_delegate)
+
+        self.table.itemChanged.connect(self._on_item_changed)
         root.addWidget(self.table)
 
         self.lbl_footer = QLabel("")
@@ -167,14 +222,16 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-weight:600;")
         lay.addWidget(title)
 
-        for code in ["M", "T", "L", "G"]:
-            chip = QLabel(f"{code} = {TURN_LABEL[code]}")
+        # Chips para todos los turnos
+        for code in TURN_ORDER:
+            d = TURN_DEFS[code]
+            chip = QLabel(f"{code} = {d['label']}")
             chip.setAlignment(Qt.AlignCenter)
             chip.setStyleSheet(
                 f"""
                 QLabel {{
-                    background: {TURN_BG[code]};
-                    color: {TURN_FG[code]};
+                    background: {d['bg']};
+                    color: {d['fg']};
                     border: 1px solid #cfcfcf;
                     border-radius: 10px;
                     padding: 4px 10px;
@@ -182,7 +239,7 @@ class MainWindow(QMainWindow):
                 }}
                 """
             )
-            chip.setToolTip(TURN_HOURS[code])
+            chip.setToolTip(d["hours"])
             lay.addWidget(chip)
 
         lay.addStretch(1)
@@ -204,6 +261,9 @@ class MainWindow(QMainWindow):
             week = self._schedule.get(emp.code, ["L"] * 7)
             for c, value in enumerate(week, start=1):
                 v = (value or "L").strip().upper()
+                if v not in TURN_DEFS:
+                    v = "L"
+
                 it = QTableWidgetItem(v)
                 it.setTextAlignment(Qt.AlignCenter)
                 it.setFont(base_font)
@@ -213,17 +273,15 @@ class MainWindow(QMainWindow):
         self.table.blockSignals(False)
         self._update_footer()
 
-    def _apply_turn_style(self, item: QTableWidgetItem, value: str) -> None:
-        v = (value or "").strip().upper()
-        if v not in TURN_BG:
-            item.setBackground(QColor("#FFFFFF"))
-            item.setForeground(QColor("#000000"))
-            item.setToolTip("")
-            return
+    def _apply_turn_style(self, item: QTableWidgetItem, code: str) -> None:
+        v = (code or "").strip().upper()
+        if v not in TURN_DEFS:
+            v = "L"
+        d = TURN_DEFS[v]
 
-        item.setBackground(QColor(TURN_BG[v]))
-        item.setForeground(QColor(TURN_FG[v]))
-        item.setToolTip(f"{v} = {TURN_LABEL[v]}")
+        item.setBackground(QColor(d["bg"]))
+        item.setForeground(QColor(d["fg"]))
+        item.setToolTip(f"{v} = {d['label']} · {d['hours']}")
 
     def _compute_coverage(self) -> List[Coverage]:
         cover: List[Coverage] = []
@@ -246,14 +304,13 @@ class MainWindow(QMainWindow):
         self.lbl_dirty.setVisible(dirty)
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
-        # Solo aplica a columnas de días; la 0 es "Empleado"
         if item.column() == 0:
             return
 
         v = (item.text() or "").strip().upper()
-        if not v:
+        if v not in TURN_DEFS:
             v = "L"
-        item.setText(v)
+            item.setText(v)
 
         self._apply_turn_style(item, v)
         self._set_dirty(True)
