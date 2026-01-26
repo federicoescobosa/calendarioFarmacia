@@ -20,7 +20,7 @@ def get_demo_employees() -> List[Employee]:
         Employee(code="C", name="Fátima"),
         Employee(code="D", name="Belén"),
         Employee(code="E", name="Thalisa"),
-        Employee(code="X", name="Dueño"),
+        Employee(code="X", name="Juán José"),
     ]
 
 
@@ -33,6 +33,6 @@ def get_demo_week_schedule() -> Schedule:
         "C": ["T", "T", "T", "T", "T", "L", "L"],
         "D": ["T", "T", "T", "T", "T", "T", "L"],
         "E": ["M", "M", "M", "M", "M", "T", "T"],
-        # Dueño: 2 tardes libres (demo)
+        # Juán José: 2 tardes libres (demo)
         "X": ["T", "L", "T", "L", "T", "L", "L"],
     }
