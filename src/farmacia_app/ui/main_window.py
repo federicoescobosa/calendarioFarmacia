@@ -10,11 +10,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QStyledItemDelegate,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
@@ -23,6 +26,15 @@ from PySide6.QtWidgets import (
 )
 
 DAYS = ["L", "M", "X", "J", "V", "S", "D"]
+
+# --- Paleta (1 sitio) ---
+ACCENT = "#1E88E5"        # azul principal
+ACCENT_DARK = "#1565C0"   # azul oscuro para borde/indicador
+SURFACE = "#FFFFFF"
+SURFACE_2 = "#F6F8FB"     # fondo sidebar
+TEXT = "#1F2937"          # gris oscuro
+TEXT_MUTED = "#6B7280"    # gris medio
+BORDER = "#E5E7EB"
 
 # Definición única de turnos: etiqueta, horas, color fondo, color texto
 TURN_DEFS: Dict[str, Dict[str, str]] = {
@@ -64,20 +76,13 @@ def get_demo_employees() -> List[Employee]:
 
 
 def get_demo_week_schedule() -> Schedule:
-    # Demo: usamos los intermedios de mañana por persona (según vuestro patrón base)
-    # Encarni: 08:30–14:30 -> M1
-    # María : 09:00–14:00 -> M2
-    # Fátima: 09:30–14:00 -> M3 (y tardes)
-    # Belén : 10:00–13:30 -> M5 (y tardes + sábados)
-    # Thalisa:10:00–14:30 -> M4 (y 1 tarde/semana cuando no guardia)
     return {
         "A": ["M1", "M1", "M1", "M1", "M1", "L", "L"],
         "B": ["M2", "M2", "M2", "M2", "M2", "L", "L"],
-        "C": ["M3", "T",  "M3", "T",  "M3", "L", "L"],  # mezcla demo
-        "D": ["M5", "T",  "M5", "T",  "M5", "T", "L"],
+        "C": ["M3", "T", "M3", "T", "M3", "L", "L"],
+        "D": ["M5", "T", "M5", "T", "M5", "T", "L"],
         "E": ["M4", "M4", "M4", "M4", "M4", "T", "L"],
-        # Dueño demo (2 tardes libres)
-        "X": ["T",  "L",  "T",  "L",  "T",  "L", "L"],
+        "X": ["T", "L", "T", "L", "T", "L", "L"],
     }
 
 
@@ -97,7 +102,6 @@ class TurnDelegate(QStyledItemDelegate):
         combo = QComboBox(parent)
         combo.addItems(TURN_ORDER)
         combo.setEditable(False)
-        # Mostrar tooltip del item seleccionado al desplegar
         combo.setToolTip("Elige turno")
         return combo
 
@@ -116,21 +120,20 @@ class TurnDelegate(QStyledItemDelegate):
 
 
 class MainWindow(QMainWindow):
+    """Ventana principal con menú lateral + páginas."""
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Farmacia - Calendario semanal (demo hardcode)")
-        self.resize(1250, 720)
+        self.resize(1400, 760)
 
         self._dirty = False
         self._employees: List[Employee] = get_demo_employees()
         self._schedule = get_demo_week_schedule()
 
-        self._build_ui()
-        self._load_table()
-
-    def _build_ui(self) -> None:
-        toolbar = QToolBar("Semana")
-        self.addToolBar(toolbar)
+        # Toolbar (solo útil para calendario; lo ocultamos en otras páginas)
+        self._toolbar = QToolBar("Semana")
+        self.addToolBar(self._toolbar)
 
         self.btn_prev = QPushButton("‹ Semana")
         self.btn_today = QPushButton("Semana actual")
@@ -138,19 +141,167 @@ class MainWindow(QMainWindow):
         self.lbl_week = QLabel("Semana demo (01/01/2026 - 07/01/2026)")
         self.lbl_week.setAlignment(Qt.AlignCenter)
 
-        toolbar.addWidget(self.btn_prev)
-        toolbar.addWidget(self.btn_today)
-        toolbar.addWidget(self.btn_next)
-        toolbar.addSeparator()
-        toolbar.addWidget(self.lbl_week)
+        self._toolbar.addWidget(self.btn_prev)
+        self._toolbar.addWidget(self.btn_today)
+        self._toolbar.addWidget(self.btn_next)
+        self._toolbar.addSeparator()
+        self._toolbar.addWidget(self.lbl_week)
 
         self.btn_prev.clicked.connect(lambda: self._toast("Demo: navegación desactivada"))
         self.btn_today.clicked.connect(lambda: self._toast("Demo: navegación desactivada"))
         self.btn_next.clicked.connect(lambda: self._toast("Demo: navegación desactivada"))
 
+        self._build_ui()
+        self._load_table()
+
+    # --------------------------
+    # UI / Navegación
+    # --------------------------
+    def _build_ui(self) -> None:
         central = QWidget()
-        root = QVBoxLayout(central)
+        root = QHBoxLayout(central)
         root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
+
+        # --- Sidebar moderno (contenedor + título + lista) ---
+        sidebar_container = QWidget()
+        sidebar_container.setFixedWidth(270)
+        sidebar_layout = QVBoxLayout(sidebar_container)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(10)
+
+        header = QLabel("Menú")
+        header.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {TEXT};
+                font-size: 14px;
+                font-weight: 700;
+                padding: 10px 12px 0px 12px;
+            }}
+            """
+        )
+
+        sub = QLabel("Farmacia")
+        sub.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {TEXT_MUTED};
+                font-size: 12px;
+                padding: 0px 12px 6px 12px;
+            }}
+            """
+        )
+
+        self.sidebar = QListWidget()
+        self.sidebar.setSpacing(6)
+        self.sidebar.setStyleSheet(
+            f"""
+            QListWidget {{
+                border: 1px solid {BORDER};
+                border-radius: 14px;
+                background: {SURFACE_2};
+                padding: 10px;
+                font-size: 13px;
+                outline: 0;
+            }}
+
+            QListWidget::item {{
+                color: {TEXT};
+                background: transparent;
+                padding: 12px 12px;
+                border-radius: 12px;
+            }}
+
+            QListWidget::item:hover {{
+                background: #EAF2FF;
+            }}
+
+            QListWidget::item:selected {{
+                background: {ACCENT};
+                color: #FFFFFF;                 /* fuerza texto blanco visible */
+                font-weight: 700;
+                border-left: 4px solid {ACCENT_DARK};
+                padding-left: 8px;              /* compensa el border-left */
+            }}
+            """
+        )
+
+        sidebar_layout.addWidget(header)
+        sidebar_layout.addWidget(sub)
+        sidebar_layout.addWidget(self.sidebar, 1)
+
+        # --- Páginas ---
+        self._pages = QStackedWidget()
+        self._pages.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self._page_index: Dict[str, int] = {}
+
+        self._add_page("Calendario", self._build_calendar_page())
+        self._add_page("Empleados", self._build_placeholder_page("Empleados", "Alta/baja y horas objetivo."))
+        self._add_page("Turnos", self._build_placeholder_page("Turnos", "Catálogo (M1..), colores y chips."))
+        self._add_page("Reglas", self._build_placeholder_page("Reglas", "Coberturas, restricciones, preferencias."))
+        self._add_page("Ausencias", self._build_placeholder_page("Ausencias", "Vacaciones, permisos, bajas."))
+        self._add_page("Validación", self._build_placeholder_page("Validación", "Alertas y conflictos accionables."))
+        self._add_page("Exportar", self._build_placeholder_page("Exportar", "PDF / Excel / CSV / ICS."))
+        self._add_page("Ajustes", self._build_placeholder_page("Ajustes", "Parámetros generales."))
+        self._add_page("Informes", self._build_placeholder_page("Informes", "Muestras históricos"))
+
+        self.sidebar.currentRowChanged.connect(self._on_nav_changed)
+
+        root.addWidget(sidebar_container)
+        root.addWidget(self._pages, 1)
+
+        self.setCentralWidget(central)
+
+        # Página por defecto
+        self.sidebar.setCurrentRow(0)
+
+    def _add_page(self, title: str, widget: QWidget) -> None:
+        item = QListWidgetItem(title)
+        item.setToolTip(title)
+        self.sidebar.addItem(item)
+        idx = self._pages.addWidget(widget)
+        self._page_index[title] = idx
+
+    def _on_nav_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        self._pages.setCurrentIndex(row)
+
+        # Toolbar solo visible en calendario
+        is_calendar = (row == self._page_index.get("Calendario", 0))
+        self._toolbar.setVisible(is_calendar)
+
+    def _build_placeholder_page(self, title: str, subtitle: str) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(18, 18, 18, 18)
+        lay.setSpacing(10)
+
+        h1 = QLabel(title)
+        h1.setStyleSheet("font-size: 22px; font-weight: 700;")
+        p = QLabel(subtitle)
+        p.setStyleSheet("color:#555; font-size: 13px;")
+        p.setWordWrap(True)
+
+        hint = QLabel("Pendiente de implementar.")
+        hint.setStyleSheet("color:#888; font-style: italic;")
+
+        lay.addWidget(h1)
+        lay.addWidget(p)
+        lay.addSpacing(8)
+        lay.addWidget(hint)
+        lay.addStretch(1)
+        return w
+
+    # --------------------------
+    # Página Calendario
+    # --------------------------
+    def _build_calendar_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
         header_row = QHBoxLayout()
@@ -198,7 +349,6 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(0, 260)
         self.table.verticalHeader().setDefaultSectionSize(34)
 
-        # Edición por click/doble click (combo). Sin tecleo libre.
         self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.SelectedClicked)
 
         self._turn_delegate = TurnDelegate(self.table)
@@ -212,7 +362,7 @@ class MainWindow(QMainWindow):
         self.lbl_footer.setStyleSheet("color:#444;")
         root.addWidget(self.lbl_footer)
 
-        self.setCentralWidget(central)
+        return page
 
     def _build_legend(self) -> QHBoxLayout:
         lay = QHBoxLayout()
@@ -222,7 +372,6 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-weight:600;")
         lay.addWidget(title)
 
-        # Chips para todos los turnos
         for code in TURN_ORDER:
             d = TURN_DEFS[code]
             chip = QLabel(f"{code} = {d['label']}")
@@ -245,6 +394,9 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         return lay
 
+    # --------------------------
+    # Datos / Lógica demo
+    # --------------------------
     def _load_table(self) -> None:
         self.table.blockSignals(True)
 
