@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import List, Dict, Optional
-
+from farmacia_app.ui.employees_page import EmployeesPage
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
@@ -344,7 +344,7 @@ class MainWindow(QMainWindow):
         self._page_index: Dict[str, int] = {}
 
         self._add_page("Calendario", self._build_calendar_page())
-        self._add_page("Empleados", self._build_placeholder_page("Empleados", "Alta/baja y horas objetivo."))
+        self._add_page("Empleados", EmployeesPage())
         self._add_page("Turnos", self._build_placeholder_page("Turnos", "Catálogo (M1..), colores y chips."))
         self._add_page("Reglas", self._build_placeholder_page("Reglas", "Coberturas, restricciones, preferencias."))
         self._add_page("Ausencias", self._build_absences_page())
