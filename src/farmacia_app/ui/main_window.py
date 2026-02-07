@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import List, Dict, Optional
-from farmacia_app.ui.employees_page import EmployeesPage
+
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
@@ -29,9 +29,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from farmacia_app.ui.employees_page import EmployeesPage
+
 # Pantalla de Reglas (diálogo) integrada desde el menú lateral.
 # La pantalla en sí NO se toca; solo se abre desde navegación.
 from farmacia_app.ui.rules_dialog import RulesDialog, default_ruleset
+
+# >>> FESTIVOS (SQLite cache)
+from farmacia_app.data.holidays_repository import HolidaysRepository
 
 DAYS = ["L", "M", "X", "J", "V", "S", "D"]
 
@@ -59,72 +64,39 @@ TURN_DEFS: Dict[str, Dict[str, str]] = {
 TURN_ORDER = ["M1", "M2", "M3", "M4", "M5", "T", "L", "G"]
 
 # --------------------------
-# Ausencias / Permisos (XXV Convenio Oficinas de Farmacia 2022-2024 - Art. 26/27)
+# Ausencias / Permisos
 # --------------------------
-# Art. 27 (permisos):
-# a) Fallecimiento (3 días, 5 con desplazamiento)
-# b) Enfermedad grave/hospitalización/reposo (5 días; 2º afinidad 3 días; puede prorrogarse)
-# c) Matrimonio de hijos/hermanos/padres: 1 día (día de la boda)
-# d) Matrimonio del personal: 20 días
-# e) Tardes 24 y 31 dic + mañana Sábado Santo
-# f) 2 días asuntos propios con restricciones (no acumular a vacaciones/puentes salvo acuerdo; no 2 empleados mismo día salvo acuerdo; preaviso 1 semana salvo fuerza mayor) :contentReference[oaicite:1]{index=1}
-#
-# Art. 26: vacaciones preferentemente mayo-oct; +5 hábiles si no imputable :contentReference[oaicite:2]{index=2}
-
 ABSENCE_DEFS: Dict[str, Dict[str, str]] = {
-    # Vacaciones
     "VAC": {"label": "Vacaciones", "bg": "#E5E7EB", "fg": "#111827"},
-
-    # Art. 27.f
     "AP": {"label": "Asuntos propios (máx 2 días/año)", "bg": "#D1FAE5", "fg": "#065F46"},
-
-    # Bajas (genérico)
     "BAJ": {"label": "Baja médica", "bg": "#FEE2E2", "fg": "#991B1B"},
-
-    # Art. 27.a (separamos para poder limitar)
     "FAL3": {"label": "Fallecimiento familiar (3 días)", "bg": "#FCE7F3", "fg": "#9D174D"},
     "FAL5": {"label": "Fallecimiento familiar + desplazamiento (5 días)", "bg": "#FBCFE8", "fg": "#9D174D"},
-
-    # Art. 27.b (versiones típicas)
     "ENF5": {"label": "Enfermedad grave/hospitalización (5 días)", "bg": "#E0E7FF", "fg": "#3730A3"},
     "ENF3": {"label": "Enfermedad grave 2º afinidad (3 días)", "bg": "#E0E7FF", "fg": "#3730A3"},
-
-    # Art. 27.c / 27.d
     "BOD1": {"label": "Boda hijos/hermanos/padres (1 día)", "bg": "#FEF3C7", "fg": "#92400E"},
     "BOD20": {"label": "Boda del personal (20 días)", "bg": "#FDE68A", "fg": "#92400E"},
-
-    # Art. 27.e
     "PER24D": {"label": "Permiso 24 dic (tarde)", "bg": "#DBEAFE", "fg": "#1D4ED8"},
     "PER31D": {"label": "Permiso 31 dic (tarde)", "bg": "#DBEAFE", "fg": "#1D4ED8"},
     "PERSAB": {"label": "Permiso Sábado Santo (mañana)", "bg": "#DBEAFE", "fg": "#1D4ED8"},
-
-    # Genérico (si necesitas otros del ET más adelante)
     "PER": {"label": "Permiso retribuido (genérico)", "bg": "#EEF2FF", "fg": "#3730A3"},
 }
 
 ABSENCE_ORDER = ["VAC", "AP", "BAJ", "FAL3", "FAL5", "ENF5", "ENF3", "BOD1", "BOD20", "PER24D", "PER31D", "PERSAB", "PER"]
 
-# Reglas de validación por tipo
 ABSENCE_RULES: Dict[str, Dict[str, object]] = {
-    # max_days: máximo de días naturales (FULL) para el permiso
-    # max_per_year_days: máximo por año por empleado (aplica a AP)
-    # forbid_multi_day_half: no permitir AM/PM si es multi-día
     "VAC": {"max_days": None},
     "BAJ": {"max_days": None},
-
     "AP": {"max_per_year_days": 2, "max_days": 2},
-
     "FAL3": {"max_days": 3},
     "FAL5": {"max_days": 5},
     "ENF5": {"max_days": 5},
     "ENF3": {"max_days": 3},
     "BOD1": {"max_days": 1},
     "BOD20": {"max_days": 20},
-
     "PER24D": {"max_days": 1, "forced_part": "PM"},
     "PER31D": {"max_days": 1, "forced_part": "PM"},
     "PERSAB": {"max_days": 1, "forced_part": "AM"},
-
     "PER": {"max_days": None},
 }
 
@@ -170,10 +142,10 @@ class Coverage:
 @dataclass
 class Absence:
     employee_code: str
-    type_code: str             # VAC, AP, ...
+    type_code: str
     start: date
     end: date
-    part: str                  # "FULL" | "AM" | "PM"
+    part: str  # "FULL" | "AM" | "PM"
     notes: str = ""
 
 
@@ -216,17 +188,17 @@ class MainWindow(QMainWindow):
         # Para que al pulsar "Reglas" en el menú lateral volvamos a la sección anterior.
         self._last_non_rules_row: int = 0
 
-        # Reglas (por ahora en memoria). Aún no afectan al calendario hardcode.
-        self._ruleset = default_ruleset(self._employees)
-
-        # Para que al pulsar "Reglas" vuelva a la sección anterior.
-        self._last_non_rules_row: int = 0
-
         # Semana: ahora la controlamos con un datepicker en toolbar (Ir a)
         self._week_start: date = date(2026, 1, 1)  # demo inicial
 
         # Ausencias en memoria (luego persistimos)
         self._absences: List[Absence] = []
+
+        # >>> FESTIVOS (España + Andalucía) - si no están en BD, los descarga y los guarda.
+        self._holidays = HolidaysRepository()
+        y = date.today().year
+        self._holidays.ensure_year(country_code="ES", subdivision_code="ES-AN", year=y)
+        self._holidays.ensure_year(country_code="ES", subdivision_code="ES-AN", year=y + 1)
 
         # Toolbar
         self._toolbar = QToolBar("Semana")
@@ -399,7 +371,6 @@ class MainWindow(QMainWindow):
     def _open_rules(self) -> None:
         dlg = RulesDialog(self, employees=self._employees, ruleset=self._ruleset)
         dlg.exec()
-        # Mantener los cambios en memoria.
         self._ruleset = dlg.ruleset()
 
     def _build_placeholder_page(self, title: str, subtitle: str) -> QWidget:
@@ -587,7 +558,6 @@ class MainWindow(QMainWindow):
         self.abs_end.setCalendarPopup(True)
         self.abs_end.setDisplayFormat("dd/MM/yyyy")
         self.abs_end.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-        # CLAVE: no se puede seleccionar fin anterior al inicio
         self.abs_end.setMinimumDate(self.abs_start.date())
 
         self.abs_part = QComboBox()
@@ -639,19 +609,15 @@ class MainWindow(QMainWindow):
         return page
 
     def _on_abs_start_changed(self) -> None:
-        # Bloquea fin < inicio
         self.abs_end.setMinimumDate(self.abs_start.date())
         if self.abs_end.date() < self.abs_start.date():
             self.abs_end.setDate(self.abs_start.date())
-
-        # Si el tipo fuerza parte (24/31 dic tarde, etc.), lo re-aplicamos
         self._on_abs_type_changed()
 
     def _on_abs_type_changed(self) -> None:
         code = self.abs_type.currentText().split(" - ", 1)[0].strip()
         rules = ABSENCE_RULES.get(code, {})
 
-        # Forzar parte si aplica
         forced_part = rules.get("forced_part")
         if forced_part == "PM":
             self.abs_part.setCurrentText("Tarde")
@@ -660,7 +626,6 @@ class MainWindow(QMainWindow):
             self.abs_part.setCurrentText("Mañana")
             self.abs_end.setDate(self.abs_start.date())
 
-        # Para permisos de 1 día típicos, si el usuario cambia, dejamos fin = inicio
         max_days = rules.get("max_days")
         if isinstance(max_days, int) and max_days == 1:
             self.abs_end.setDate(self.abs_start.date())
@@ -682,7 +647,6 @@ class MainWindow(QMainWindow):
         elif part_txt == "Tarde":
             part = "PM"
 
-        # Regla: no permitimos AM/PM en rangos de varios días (evita líos)
         if part != "FULL" and start != end:
             QMessageBox.warning(self, "Ausencias", "Si eliges Mañana/Tarde debe ser un único día (inicio = fin).")
             return
@@ -706,24 +670,19 @@ class MainWindow(QMainWindow):
         code = new_abs.type_code
         rules = ABSENCE_RULES.get(code, {})
 
-        # Forzar parte si aplica
         forced_part = rules.get("forced_part")
         if forced_part and new_abs.part != forced_part:
             return False, f"Este tipo de permiso exige parte fija: {'Tarde' if forced_part=='PM' else 'Mañana'}."
 
-        # Max días (si aplica)
         max_days = rules.get("max_days")
         days_len = (new_abs.end - new_abs.start).days + 1
         if isinstance(max_days, int) and days_len > max_days:
             return False, f"Este permiso no puede superar {max_days} día(s)."
 
-        # AP: no más de 2 días/año (por empleado)
         if code == "AP":
-            # (simple y útil) no admitimos AP cruzando años
             if new_abs.start.year != new_abs.end.year:
                 return False, "Asuntos propios debe estar dentro del mismo año."
 
-            # Cuenta días ya pedidos en ese año
             used = 0.0
             for a in self._absences:
                 if a.employee_code != new_abs.employee_code or a.type_code != "AP":
@@ -738,7 +697,6 @@ class MainWindow(QMainWindow):
             if used > float(max_per_year) + 1e-9:
                 return False, f"Asuntos propios: máximo {max_per_year} días/año. Ya llevas {used - self._absence_units(new_abs):g}."
 
-            # Restricción convenio: no 2 empleados el mismo día salvo acuerdo
             for day in self._iter_days(new_abs.start, new_abs.end):
                 for a in self._absences:
                     if a.type_code != "AP":
@@ -748,35 +706,27 @@ class MainWindow(QMainWindow):
                     if a.start <= day <= a.end:
                         return False, f"Asuntos propios: ya hay otro empleado con AP el {day.strftime('%d/%m/%Y')}."
 
-            # Restricción convenio: no acumular a vacaciones (lo interpretamos como: no pegado a VAC)
             for a in self._absences:
                 if a.employee_code != new_abs.employee_code:
                     continue
                 if a.type_code != "VAC":
                     continue
-                # solapado
                 if not (new_abs.end < a.start or new_abs.start > a.end):
                     return False, "Asuntos propios no puede solaparse con vacaciones."
-                # pegado (puente con vacaciones)
                 if (new_abs.end + timedelta(days=1)) == a.start or (new_abs.start - timedelta(days=1)) == a.end:
                     return False, "Asuntos propios no puede ir pegado a vacaciones (salvo acuerdo)."
 
-            # Restricción convenio: preaviso 1 semana (salvo fuerza mayor)
-            # En la app no modelamos “fuerza mayor”, así que lo aplicamos tal cual.
             today = date.today()
             if new_abs.start < (today + timedelta(days=7)):
                 return False, "Asuntos propios requiere solicitud con al menos 1 semana de antelación (salvo fuerza mayor)."
 
-        # BOD20: máximo 20 días
         if code == "BOD20":
             if days_len > 20:
                 return False, "Boda del personal: máximo 20 días."
 
-        # BOD1: exactamente 1 día (por coherencia)
         if code == "BOD1" and days_len != 1:
             return False, "Boda de hijos/hermanos/padres: es 1 día (día de la boda)."
 
-        # PER24D / PER31D: deben ser 24/12 o 31/12
         if code in ("PER24D", "PER31D"):
             day = new_abs.start
             if new_abs.start != new_abs.end:
@@ -786,7 +736,6 @@ class MainWindow(QMainWindow):
             if code == "PER31D" and not (day.day == 31 and day.month == 12):
                 return False, "Este permiso solo aplica el 31/12 (tarde)."
 
-        # No duplicar exactamente la misma ausencia (mismo empleado, tipo, fechas, parte)
         for a in self._absences:
             if (
                 a.employee_code == new_abs.employee_code
@@ -797,7 +746,6 @@ class MainWindow(QMainWindow):
             ):
                 return False, "Esa ausencia ya existe."
 
-        # No permitir solapes de ausencias en el mismo empleado (simplificación sana)
         for a in self._absences:
             if a.employee_code != new_abs.employee_code:
                 continue
@@ -815,7 +763,6 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _absence_units(a: Absence) -> float:
-        # FULL = 1 día por día natural. AM/PM = 0.5 (y en esta app solo permitimos 1 día en AM/PM)
         days_len = (a.end - a.start).days + 1
         if a.part == "FULL":
             return float(days_len)
@@ -859,7 +806,6 @@ class MainWindow(QMainWindow):
         end = self._week_start + timedelta(days=6)
         self.lbl_week.setText(f"Semana ({self._week_start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})")
 
-        # sincroniza el picker con el estado actual (sin bucles)
         self.week_picker.blockSignals(True)
         self.week_picker.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
         self.week_picker.blockSignals(False)
@@ -871,7 +817,6 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(headers)
 
     def _on_week_picker_changed(self, qd: QDate) -> None:
-        # Si eliges 04/04 -> esa es la semana base; y navegará desde ahí.
         self._week_start = self._qdate_to_date(qd)
         self._refresh_week_header()
         self._load_table()
@@ -894,6 +839,22 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _qdate_to_date(qd: QDate) -> date:
         return date(qd.year(), qd.month(), qd.day())
+
+    # --------------------------
+    # FESTIVOS (helpers)
+    # --------------------------
+    def _is_holiday(self, day: date) -> bool:
+        return self._holidays.is_holiday(day=day, country_code="ES", subdivision_code="ES-AN")
+
+    def _apply_holiday_style(self, item: QTableWidgetItem, day: date) -> None:
+        name = self._holidays.holiday_name(day=day, country_code="ES", subdivision_code="ES-AN") or "Festivo"
+        item.setBackground(QColor("#E6E6E6"))
+        item.setForeground(QColor("#666666"))
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+        prev = item.toolTip() or ""
+        extra = f"Festivo: {name}"
+        item.setToolTip((prev + "\n" if prev else "") + extra)
 
     # --------------------------
     # Datos / Lógica
@@ -926,6 +887,12 @@ class MainWindow(QMainWindow):
                 abs_hit = self._find_absence(emp.code, cell_date)
                 if abs_hit is not None:
                     self._apply_absence_style(it, abs_hit)
+
+                # >>> FESTIVO: forzar 'L' + gris + no editable (prioridad final)
+                if self._is_holiday(cell_date):
+                    it.setText("L")
+                    self._apply_turn_style(it, "L")  # asegura tooltip/estilo de Libre
+                    self._apply_holiday_style(it, cell_date)
 
                 self.table.setItem(r, c, it)
 
@@ -993,6 +960,17 @@ class MainWindow(QMainWindow):
             return
 
         if not (item.flags() & Qt.ItemIsEditable):
+            return
+
+        # >>> Seguridad extra: si alguien intenta editar un festivo, lo bloqueamos y avisamos.
+        cell_date = self._week_start + timedelta(days=(item.column() - 1))
+        if self._is_holiday(cell_date):
+            self.table.blockSignals(True)
+            item.setText("L")
+            self._apply_turn_style(item, "L")
+            self._apply_holiday_style(item, cell_date)
+            self.table.blockSignals(False)
+            QMessageBox.information(self, "Festivo", "No se puede editar un día festivo.")
             return
 
         v = (item.text() or "").strip().upper()
