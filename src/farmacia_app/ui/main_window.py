@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import List, Dict, Optional
 
-from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtCore import Qt, QDate, QTimer
+from PySide6.QtGui import QFont, QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -21,22 +21,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStyledItemDelegate,
-    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
-
-from farmacia_app.ui.employees_page import EmployeesPage
-from farmacia_app.ui.rules_dialog import RulesDialog, default_ruleset
-
-# >>> BD
-from farmacia_app.data.db import connect, ensure_schema
-
-# >>> FESTIVOS (SQLite cache)
-from farmacia_app.data.holidays_repository import HolidaysRepository
 
 DAYS = ["L", "M", "X", "J", "V", "S", "D"]
 
@@ -64,7 +54,7 @@ TURN_DEFS: Dict[str, Dict[str, str]] = {
 TURN_ORDER = ["M1", "M2", "M3", "M4", "M5", "T", "L", "G"]
 
 # --------------------------
-# Ausencias / Permisos
+# Ausencias / Permisos (XXV Convenio Oficinas de Farmacia 2022-2024 - Art. 26/27)
 # --------------------------
 ABSENCE_DEFS: Dict[str, Dict[str, str]] = {
     "VAC": {"label": "Vacaciones", "bg": "#E5E7EB", "fg": "#111827"},
@@ -103,13 +93,33 @@ ABSENCE_RULES: Dict[str, Dict[str, object]] = {
 
 @dataclass
 class Employee:
-    # Usamos el ID de la BD (string) como "code" interno para el calendario
     code: str
-    # Nombre completo para pintar
     name: str
 
 
 Schedule = dict[str, list[str]]  # employee_code -> 7 valores (L..D)
+
+
+def get_demo_employees() -> List[Employee]:
+    return [
+        Employee(code="A", name="Encarni"),
+        Employee(code="B", name="María"),
+        Employee(code="C", name="Fátima"),
+        Employee(code="D", name="Belén"),
+        Employee(code="E", name="Thalisa"),
+        Employee(code="X", name="Dueño"),
+    ]
+
+
+def get_demo_week_schedule() -> Schedule:
+    return {
+        "A": ["M1", "M1", "M1", "M1", "M1", "L", "L"],
+        "B": ["M2", "M2", "M2", "M2", "M2", "L", "L"],
+        "C": ["M3", "T", "M3", "T", "M3", "L", "L"],
+        "D": ["M5", "T", "M5", "T", "M5", "T", "L"],
+        "E": ["M4", "M4", "M4", "M4", "M4", "T", "L"],
+        "X": ["T", "L", "T", "L", "T", "L", "L"],
+    }
 
 
 @dataclass
@@ -155,37 +165,18 @@ class TurnDelegate(QStyledItemDelegate):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Farmacia - Calendario semanal")
+        self.setWindowTitle("Farmacia - Calendario semanal (demo hardcode)")
         self.resize(1400, 760)
 
         self._dirty = False
+        self._employees: List[Employee] = get_demo_employees()
+        self._schedule = get_demo_week_schedule()
 
-        # >>> BD (empleados ya vienen de aquí)
-        self._conn = connect()
-        ensure_schema(self._conn)
-
-        # Semana
+        # Semana: ahora la controlamos con un datepicker en toolbar (Ir a)
         self._week_start: date = date(2026, 1, 1)  # demo inicial
 
         # Ausencias en memoria (luego persistimos)
         self._absences: List[Absence] = []
-
-        # Empleados desde BD
-        self._ensure_owner_exists()
-        self._employees: List[Employee] = self._load_employees_from_db()
-
-        # Calendario: de momento NO hay tabla de turnos aún, así que por defecto todo L
-        self._schedule: Schedule = {}  # si no hay clave, se usa L
-
-        # Reglas (en memoria)
-        self._ruleset = default_ruleset(self._employees)
-        self._last_non_rules_row: int = 0
-
-        # >>> FESTIVOS (España + Andalucía)
-        self._holidays = HolidaysRepository()
-        y = date.today().year
-        self._holidays.ensure_year(country_code="ES", subdivision_code="ES-AN", year=y)
-        self._holidays.ensure_year(country_code="ES", subdivision_code="ES-AN", year=y + 1)
 
         # Toolbar
         self._toolbar = QToolBar("Semana")
@@ -222,53 +213,70 @@ class MainWindow(QMainWindow):
         self._refresh_week_header()
         self._load_table()
 
+        # Extra: si alguien usa win.show() en vez de main.py, esto aún asegura centrar+ampliar
+        QTimer.singleShot(0, self._maximize_on_current_screen)
+
     # --------------------------
-    # BD - Empleados
+    # Helpers de ventana / diálogos
     # --------------------------
-    def _ensure_owner_exists(self) -> None:
-        """
-        Garantiza que en la tabla employees existe el dueño:
-        Nombre: Juan Jose
-        Apellido1: (vacío)
-        Apellido2: (vacío)
-        DNI: OWNER (placeholder)
-        is_owner = 1
-        """
-        cur = self._conn.execute("SELECT id FROM employees WHERE is_owner = 1 LIMIT 1;")
-        row = cur.fetchone()
-        if row is not None:
+    def _maximize_on_current_screen(self) -> None:
+        # Garantiza que cae en una pantalla válida y maximiza.
+        # Si la ventana estuviera fuera de pantalla por una config previa, la reubicamos al centro primero.
+        scr = self.screen() or QGuiApplication.primaryScreen()
+        if scr:
+            geo = scr.availableGeometry()
+            # Coloca la ventana en el centro antes de maximizar (evita "medio fuera")
+            self.move(geo.center() - self.rect().center())
+        self.showMaximized()
+        self.activateWindow()
+        self.raise_()
+
+    def _center_on_parent(self, w: QWidget) -> None:
+        parent = self if self.isVisible() else None
+        if parent is not None:
+            p = parent.frameGeometry()
+            w.adjustSize()
+            w.move(p.center() - w.rect().center())
             return
 
-        # Si no hay dueño, lo creamos. DNI placeholder único.
-        self._conn.execute(
-            """
-            INSERT INTO employees (nombre, apellido1, apellido2, dni, is_owner)
-            VALUES (?, ?, ?, ?, 1);
-            """,
-            ("Juan Jose", "", "", "OWNER"),
-        )
-        self._conn.commit()
+        scr = QGuiApplication.primaryScreen()
+        if scr is None:
+            return
+        geo = scr.availableGeometry()
+        w.adjustSize()
+        w.move(geo.center() - w.rect().center())
 
-    def _load_employees_from_db(self) -> List[Employee]:
-        cur = self._conn.execute(
-            """
-            SELECT id, nombre, apellido1, apellido2, is_owner
-            FROM employees
-            ORDER BY is_owner DESC, apellido1 ASC, apellido2 ASC, nombre ASC, id ASC;
-            """
-        )
-        employees: List[Employee] = []
-        for r in cur.fetchall():
-            emp_id = str(r["id"])
-            nombre = (r["nombre"] or "").strip()
-            a1 = (r["apellido1"] or "").strip()
-            a2 = (r["apellido2"] or "").strip()
-            full = " ".join([p for p in [nombre, a1, a2] if p])
-            employees.append(Employee(code=emp_id, name=full if full else f"Empleado {emp_id}"))
-        return employees
+    def _msg_info(self, title: str, text: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Ok)
+        self._center_on_parent(box)
+        box.exec()
+
+    def _msg_warn(self, title: str, text: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Ok)
+        self._center_on_parent(box)
+        box.exec()
+
+    def _msg_question(self, title: str, text: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        self._center_on_parent(box)
+        res = box.exec()
+        return res == QMessageBox.Yes
 
     # --------------------------
-    # UI / Navegación
+    # UI
     # --------------------------
     def _build_ui(self) -> None:
         central = QWidget()
@@ -342,94 +350,14 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(sub)
         sidebar_layout.addWidget(self.sidebar, 1)
 
-        self._pages = QStackedWidget()
-        self._pages.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._page_index: Dict[str, int] = {}
-
-        self._add_page("Calendario", self._build_calendar_page())
-        self._add_page("Empleados", EmployeesPage())
-        self._add_page("Turnos", self._build_placeholder_page("Turnos", "Catálogo (M1..), colores y chips."))
-        self._add_page("Reglas", self._build_placeholder_page("Reglas", "Coberturas, restricciones, preferencias."))
-        self._add_page("Ausencias", self._build_absences_page())
-        self._add_page("Validación", self._build_placeholder_page("Validación", "Alertas y conflictos accionables."))
-        self._add_page("Exportar", self._build_placeholder_page("Exportar", "PDF / Excel / CSV / ICS."))
-        self._add_page("Ajustes", self._build_placeholder_page("Ajustes", "Parámetros generales."))
-
-        self.sidebar.currentRowChanged.connect(self._on_nav_changed)
-
+        # Solo calendario en este zip (mantengo tu estructura)
         root.addWidget(sidebar_container)
-        root.addWidget(self._pages, 1)
 
-        self.setCentralWidget(central)
-        self.sidebar.setCurrentRow(0)
-
-    def _add_page(self, title: str, widget: QWidget) -> None:
-        item = QListWidgetItem(title)
-        item.setToolTip(title)
-        self.sidebar.addItem(item)
-        idx = self._pages.addWidget(widget)
-        self._page_index[title] = idx
-
-    def _on_nav_changed(self, row: int) -> None:
-        if row < 0:
-            return
-
-        if row == self._page_index.get("Reglas", -1):
-            self._open_rules()
-            self.sidebar.blockSignals(True)
-            self.sidebar.setCurrentRow(self._last_non_rules_row)
-            self.sidebar.blockSignals(False)
-            return
-
-        self._last_non_rules_row = row
-        self._pages.setCurrentIndex(row)
-        is_calendar = (row == self._page_index.get("Calendario", 0))
-        self._toolbar.setVisible(is_calendar)
-
-        if row == self._page_index.get("Ausencias", -1):
-            self.abs_start.blockSignals(True)
-            self.abs_end.blockSignals(True)
-            self.abs_start.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-            self.abs_end.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-            self.abs_end.setMinimumDate(self.abs_start.date())
-            self.abs_start.blockSignals(False)
-            self.abs_end.blockSignals(False)
-
-    def _open_rules(self) -> None:
-        dlg = RulesDialog(self, employees=self._employees, ruleset=self._ruleset)
-        dlg.exec()
-        self._ruleset = dlg.ruleset()
-
-    def _build_placeholder_page(self, title: str, subtitle: str) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(18, 18, 18, 18)
-        lay.setSpacing(10)
-
-        h1 = QLabel(title)
-        h1.setStyleSheet("font-size: 22px; font-weight: 700;")
-        p = QLabel(subtitle)
-        p.setStyleSheet("color:#555; font-size: 13px;")
-        p.setWordWrap(True)
-
-        hint = QLabel("Pendiente de implementar.")
-        hint.setStyleSheet("color:#888; font-style: italic;")
-
-        lay.addWidget(h1)
-        lay.addWidget(p)
-        lay.addSpacing(8)
-        lay.addWidget(hint)
-        lay.addStretch(1)
-        return w
-
-    # --------------------------
-    # Página Calendario
-    # --------------------------
-    def _build_calendar_page(self) -> QWidget:
-        page = QWidget()
-        root = QVBoxLayout(page)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        # Página principal: calendario
+        self._pages = QWidget()
+        pages_lay = QVBoxLayout(self._pages)
+        pages_lay.setContentsMargins(0, 0, 0, 0)
+        pages_lay.setSpacing(10)
 
         header_row = QHBoxLayout()
         self.lbl_dirty = QLabel("● Cambios sin guardar")
@@ -442,9 +370,9 @@ class MainWindow(QMainWindow):
         header_row.addWidget(self.lbl_dirty)
         header_row.addStretch(1)
         header_row.addWidget(self.btn_save)
-        root.addLayout(header_row)
+        pages_lay.addLayout(header_row)
 
-        root.addLayout(self._build_legend())
+        pages_lay.addLayout(self._build_legend())
 
         self.table = QTableWidget()
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -481,14 +409,15 @@ class MainWindow(QMainWindow):
         self.table.setItemDelegate(self._turn_delegate)
 
         self.table.itemChanged.connect(self._on_item_changed)
-        root.addWidget(self.table)
+        pages_lay.addWidget(self.table)
 
         self.lbl_footer = QLabel("")
         self.lbl_footer.setAlignment(Qt.AlignLeft)
         self.lbl_footer.setStyleSheet("color:#444;")
-        root.addWidget(self.lbl_footer)
+        pages_lay.addWidget(self.lbl_footer)
 
-        return page
+        root.addWidget(self._pages, 1)
+        self.setCentralWidget(central)
 
     def _build_legend(self) -> QHBoxLayout:
         lay = QHBoxLayout()
@@ -519,97 +448,6 @@ class MainWindow(QMainWindow):
 
         lay.addStretch(1)
         return lay
-
-    # --------------------------
-    # Página Ausencias (sin cambios relevantes a BD por ahora)
-    # --------------------------
-    def _build_absences_page(self) -> QWidget:
-        page = QWidget()
-        root = QVBoxLayout(page)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(12)
-
-        title = QLabel("Ausencias")
-        title.setStyleSheet("font-size: 22px; font-weight: 700;")
-        root.addWidget(title)
-
-        form = QHBoxLayout()
-        form.setSpacing(10)
-
-        self.abs_emp = QComboBox()
-        self.abs_emp.addItems([f"{e.code} - {e.name}" for e in self._employees])
-
-        self.abs_type = QComboBox()
-        self.abs_type.addItems([f"{c} - {ABSENCE_DEFS[c]['label']}" for c in ABSENCE_ORDER])
-
-        self.abs_start = QDateEdit()
-        self.abs_start.setCalendarPopup(True)
-        self.abs_start.setDisplayFormat("dd/MM/yyyy")
-        self.abs_start.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-
-        self.abs_end = QDateEdit()
-        self.abs_end.setCalendarPopup(True)
-        self.abs_end.setDisplayFormat("dd/MM/yyyy")
-        self.abs_end.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-        self.abs_end.setMinimumDate(self.abs_start.date())
-
-        self.abs_part = QComboBox()
-        self.abs_part.addItems(["Día completo", "Mañana", "Tarde"])
-
-        self.abs_notes = QLineEdit()
-        self.abs_notes.setPlaceholderText("Notas (opcional)")
-
-        self.abs_add = QPushButton("Añadir")
-        self.abs_add.clicked.connect(self._add_absence)
-
-        form.addWidget(QLabel("Empleado"))
-        form.addWidget(self.abs_emp, 1)
-        form.addWidget(QLabel("Tipo"))
-        form.addWidget(self.abs_type, 1)
-        form.addWidget(QLabel("Inicio"))
-        form.addWidget(self.abs_start)
-        form.addWidget(QLabel("Fin"))
-        form.addWidget(self.abs_end)
-        form.addWidget(QLabel("Parte"))
-        form.addWidget(self.abs_part)
-        form.addWidget(self.abs_notes, 2)
-        form.addWidget(self.abs_add)
-
-        root.addLayout(form)
-
-        self.abs_table = QTableWidget()
-        self.abs_table.setColumnCount(6)
-        self.abs_table.setHorizontalHeaderLabels(["Empleado", "Tipo", "Inicio", "Fin", "Parte", "Notas"])
-        self.abs_table.verticalHeader().setVisible(False)
-        self.abs_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.abs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.abs_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.abs_table.setAlternatingRowColors(True)
-
-        hh = self.abs_table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.Stretch)
-
-        root.addWidget(self.abs_table, 1)
-
-        actions = QHBoxLayout()
-        self.abs_delete = QPushButton("Borrar seleccionado")
-        self.abs_delete.clicked.connect(self._delete_selected_absence)
-        actions.addStretch(1)
-        actions.addWidget(self.abs_delete)
-        root.addLayout(actions)
-
-        self._absences: List[Absence] = []
-        self._refresh_absences_table()
-        return page
-
-    def _add_absence(self) -> None:
-        QMessageBox.information(self, "Ausencias", "Esto sigue en demo. No tocamos más aquí hoy.")
-
-    def _delete_selected_absence(self) -> None:
-        return
-
-    def _refresh_absences_table(self) -> None:
-        self.abs_table.setRowCount(0)
 
     # --------------------------
     # Semana / Fechas
@@ -653,29 +491,9 @@ class MainWindow(QMainWindow):
         return date(qd.year(), qd.month(), qd.day())
 
     # --------------------------
-    # FESTIVOS
-    # --------------------------
-    def _is_holiday(self, day: date) -> bool:
-        return self._holidays.is_holiday(day=day, country_code="ES", subdivision_code="ES-AN")
-
-    def _apply_holiday_style(self, item: QTableWidgetItem, day: date) -> None:
-        name = self._holidays.holiday_name(day=day, country_code="ES", subdivision_code="ES-AN") or "Festivo"
-        item.setBackground(QColor("#E6E6E6"))
-        item.setForeground(QColor("#666666"))
-        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-        prev = item.toolTip() or ""
-        item.setToolTip((prev + "\n" if prev else "") + f"Festivo: {name}")
-
-    # --------------------------
     # Datos / Lógica
     # --------------------------
     def _load_table(self) -> None:
-        # Recarga empleados desde BD por si los has creado/borrrado en la pantalla Empleados
-        self._employees = self._load_employees_from_db()
-
-        # Re-sincroniza reglas por si cambia lista de empleados (simple)
-        self._ruleset = default_ruleset(self._employees)
-
         self.table.blockSignals(True)
 
         self.table.setRowCount(len(self._employees))
@@ -683,13 +501,12 @@ class MainWindow(QMainWindow):
         base_font.setPointSize(11)
 
         for r, emp in enumerate(self._employees):
-            name_item = QTableWidgetItem(f"{emp.name}")
+            name_item = QTableWidgetItem(f"{emp.code} - {emp.name}")
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             name_item.setFont(base_font)
             self.table.setItem(r, 0, name_item)
 
             week = self._schedule.get(emp.code, ["L"] * 7)
-
             for c, value in enumerate(week, start=1):
                 v = (value or "L").strip().upper()
                 if v not in TURN_DEFS:
@@ -699,14 +516,6 @@ class MainWindow(QMainWindow):
                 it.setTextAlignment(Qt.AlignCenter)
                 it.setFont(base_font)
                 self._apply_turn_style(it, v)
-
-                cell_date = self._week_start + timedelta(days=(c - 1))
-
-                # Festivo => L forzado
-                if self._is_holiday(cell_date):
-                    it.setText("L")
-                    self._apply_turn_style(it, "L")
-                    self._apply_holiday_style(it, cell_date)
 
                 self.table.setItem(r, c, it)
 
@@ -718,6 +527,7 @@ class MainWindow(QMainWindow):
         if v not in TURN_DEFS:
             v = "L"
         d = TURN_DEFS[v]
+
         item.setBackground(QColor(d["bg"]))
         item.setForeground(QColor(d["fg"]))
         item.setToolTip(f"{v} = {d['label']} · {d['hours']}")
@@ -749,17 +559,8 @@ class MainWindow(QMainWindow):
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == 0:
             return
-        if not (item.flags() & Qt.ItemIsEditable):
-            return
 
-        cell_date = self._week_start + timedelta(days=(item.column() - 1))
-        if self._is_holiday(cell_date):
-            self.table.blockSignals(True)
-            item.setText("L")
-            self._apply_turn_style(item, "L")
-            self._apply_holiday_style(item, cell_date)
-            self.table.blockSignals(False)
-            QMessageBox.information(self, "Festivo", "No se puede editar un día festivo.")
+        if not (item.flags() & Qt.ItemIsEditable):
             return
 
         v = (item.text() or "").strip().upper()
@@ -773,14 +574,23 @@ class MainWindow(QMainWindow):
 
     def _on_save(self) -> None:
         if not self._dirty:
-            QMessageBox.information(self, "Info", "Nada que guardar (demo).")
+            self._toast("Nada que guardar (demo).")
             return
         self._set_dirty(False)
-        QMessageBox.information(self, "Info", "Guardado (demo).")
+        self._toast("Guardado (demo).")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        if self._dirty:
+            if not self._msg_question("Salir", "Hay cambios sin guardar (demo). ¿Salir igualmente?"):
+                event.ignore()
+                return
         event.accept()
+
+    def _toast(self, msg: str) -> None:
+        self._msg_info("Info", msg)
+
+    # --------------------------
+    # Validación (usos de QMessageBox centrados)
+    # --------------------------
+    def _warn_ausencias(self, msg: str) -> None:
+        self._msg_warn("Ausencias", msg)
