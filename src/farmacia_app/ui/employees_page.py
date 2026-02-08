@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -28,16 +29,23 @@ class EmployeeFormData:
     apellido1: str
     apellido2: str
     dni: str
+    email: str
+    role: str
 
 
 class EmployeeFormDialog(QDialog):
-    def __init__(self, parent: QWidget, title: str, initial: Optional[EmployeeFormData] = None, dni_readonly: bool = False):
+    def __init__(
+        self,
+        parent: QWidget,
+        title: str,
+        initial: Optional[EmployeeFormData] = None,
+        dni_readonly: bool = False,
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(520, 240)
+        self.resize(560, 320)
 
         root = QVBoxLayout(self)
-
         form = QFormLayout()
         root.addLayout(form)
 
@@ -45,20 +53,28 @@ class EmployeeFormDialog(QDialog):
         self.in_ap1 = QLineEdit()
         self.in_ap2 = QLineEdit()
         self.in_dni = QLineEdit()
+        self.in_email = QLineEdit()
 
-        self.in_dni.setPlaceholderText("Ej: 12345678Z")
+        self.cb_role = QComboBox()
+        self.cb_role.addItems(["Empleado", "Jefe"])
+
         self.in_dni.setReadOnly(dni_readonly)
+        self.in_email.setPlaceholderText("correo@dominio.com")
 
         form.addRow("Nombre", self.in_nombre)
         form.addRow("Apellido 1", self.in_ap1)
         form.addRow("Apellido 2", self.in_ap2)
         form.addRow("DNI", self.in_dni)
+        form.addRow("Correo electrónico", self.in_email)
+        form.addRow("Rol", self.cb_role)
 
         if initial:
             self.in_nombre.setText(initial.nombre)
             self.in_ap1.setText(initial.apellido1)
             self.in_ap2.setText(initial.apellido2)
             self.in_dni.setText(initial.dni)
+            self.in_email.setText(initial.email)
+            self.cb_role.setCurrentText(initial.role if initial.role in ("Empleado", "Jefe") else "Empleado")
 
         self.msg = QLabel("")
         self.msg.setStyleSheet("color:#b00020; font-weight:600;")
@@ -73,7 +89,6 @@ class EmployeeFormDialog(QDialog):
     def _validate(self) -> None:
         nombre = self.in_nombre.text().strip()
         ap1 = self.in_ap1.text().strip()
-        ap2 = self.in_ap2.text().strip()
         dni = self.in_dni.text().strip().upper()
 
         if not nombre or not ap1:
@@ -91,10 +106,21 @@ class EmployeeFormDialog(QDialog):
             apellido1=self.in_ap1.text().strip(),
             apellido2=self.in_ap2.text().strip(),
             dni=self.in_dni.text().strip().upper(),
+            email=self.in_email.text().strip(),
+            role=self.cb_role.currentText().strip(),
         )
 
 
 class EmployeesPage(QWidget):
+    """
+    Página del menú lateral: Empleados
+    - Lista empleados
+    - Alta/Edición/Borrado
+    - Emite employees_changed cuando cambia algo (para refrescar calendario y reglas)
+    """
+
+    employees_changed = Signal()
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._repo = EmployeeRepository()
@@ -103,102 +129,77 @@ class EmployeesPage(QWidget):
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(10)
 
-        h1 = QLabel("Empleados")
-        h1.setStyleSheet("font-size: 22px; font-weight: 700;")
-        sub = QLabel("Alta, edición y baja. Incluye el Dueño.")
-        sub.setStyleSheet("color:#555; font-size: 13px;")
-        sub.setWordWrap(True)
+        title = QLabel("Empleados")
+        title.setStyleSheet("font-size:22px; font-weight:700;")
+        root.addWidget(title)
 
         top = QHBoxLayout()
-        self.btn_new = QPushButton("Nuevo empleado")
-        self.btn_new.clicked.connect(self._new_employee)
-        top.addWidget(self.btn_new)
+        self.btn_add = QPushButton("Nuevo empleado")
+        self.btn_add.clicked.connect(self._on_add)
+        top.addWidget(self.btn_add)
         top.addStretch(1)
-
-        root.addWidget(h1)
-        root.addWidget(sub)
         root.addLayout(top)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Nombre completo", "DNI", "Tipo", "Acciones", ""])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["ID", "Nombre completo", "DNI", "Email", "Rol", "Acciones"])
+        self.table.setColumnHidden(0, True)  # ocultamos ID
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
         root.addWidget(self.table, 1)
 
         self._reload()
 
+    # ✅ Método público (lo usa MainWindow)
+    def reload(self) -> None:
+        self._reload()
+
     def _reload(self) -> None:
         employees = self._repo.list_all()
-
         self.table.setRowCount(len(employees))
-        self.table.setColumnHidden(4, True)  # guardamos el id aquí
 
         for r, e in enumerate(employees):
-            it_name = QTableWidgetItem(e.full_name if e.full_name.strip() else e.nombre)
-            it_dni = QTableWidgetItem(e.dni)
-            it_type = QTableWidgetItem("Dueño" if e.is_owner else "Empleado")
+            self.table.setItem(r, 0, QTableWidgetItem(str(e.id)))
+            self.table.setItem(r, 1, QTableWidgetItem(e.full_name if e.full_name.strip() else e.nombre))
+            self.table.setItem(r, 2, QTableWidgetItem(e.dni))
+            self.table.setItem(r, 3, QTableWidgetItem(e.email))
+            self.table.setItem(r, 4, QTableWidgetItem(e.role))
 
-            it_name.setData(Qt.UserRole, e.id)
-
-            self.table.setItem(r, 0, it_name)
-            self.table.setItem(r, 1, it_dni)
-            self.table.setItem(r, 2, it_type)
-
-            # Acciones
-            btn_detail = QPushButton("Detalle")
             btn_edit = QPushButton("Editar")
             btn_del = QPushButton("Borrar")
-
-            btn_detail.clicked.connect(lambda _=False, emp_id=e.id: self._detail(emp_id))
-            btn_edit.clicked.connect(lambda _=False, emp_id=e.id: self._edit(emp_id))
-            btn_del.clicked.connect(lambda _=False, emp_id=e.id: self._delete(emp_id))
+            btn_edit.clicked.connect(lambda _=False, emp_id=e.id: self._on_edit(emp_id))
+            btn_del.clicked.connect(lambda _=False, emp_id=e.id: self._on_delete(emp_id))
 
             if e.is_owner:
                 btn_del.setEnabled(False)
 
-            actions = QHBoxLayout()
-            actions.setContentsMargins(0, 0, 0, 0)
             w = QWidget()
-            actions.addWidget(btn_detail)
-            actions.addWidget(btn_edit)
-            actions.addWidget(btn_del)
-            actions.addStretch(1)
-            w.setLayout(actions)
-            self.table.setCellWidget(r, 3, w)
-
-            # id oculto
-            self.table.setItem(r, 4, QTableWidgetItem(str(e.id)))
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(btn_edit)
+            lay.addWidget(btn_del)
+            lay.addStretch(1)
+            self.table.setCellWidget(r, 5, w)
 
         self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setStretchLastSection(True)
 
-    def _new_employee(self) -> None:
+    def _on_add(self) -> None:
         dlg = EmployeeFormDialog(self, "Crear empleado")
         if dlg.exec() != QDialog.Accepted:
             return
 
         d = dlg.data()
         try:
-            self._repo.create(d.nombre, d.apellido1, d.apellido2, d.dni)
+            self._repo.create(d.nombre, d.apellido1, d.apellido2, d.dni, d.email, d.role)
         except ValueError as ex:
             QMessageBox.warning(self, "Error", str(ex))
             return
 
         self._reload()
+        self.employees_changed.emit()
 
-    def _detail(self, emp_id: int) -> None:
-        # Placeholder: se definirá más adelante
-        emp = self._repo.get_by_id(emp_id)
-        if not emp:
-            return
-        QMessageBox.information(self, "Detalle", f"Pendiente.\n\n{emp.full_name}\nDNI: {emp.dni}")
-
-    def _edit(self, emp_id: int) -> None:
-        emp = self._repo.get_by_id(emp_id)
+    def _on_edit(self, emp_id: int) -> None:
+        emp: Optional[EmployeeRow] = self._repo.get_by_id(emp_id)
         if not emp:
             QMessageBox.warning(self, "Error", "Empleado no encontrado.")
             return
@@ -208,21 +209,25 @@ class EmployeesPage(QWidget):
             apellido1=emp.apellido1,
             apellido2=emp.apellido2,
             dni=emp.dni,
+            email=emp.email,
+            role=emp.role,
         )
+
         dlg = EmployeeFormDialog(self, "Editar empleado", initial=initial, dni_readonly=emp.is_owner)
         if dlg.exec() != QDialog.Accepted:
             return
 
         d = dlg.data()
         try:
-            self._repo.update(emp_id, d.nombre, d.apellido1, d.apellido2, d.dni)
+            self._repo.update(emp_id, d.nombre, d.apellido1, d.apellido2, d.dni, d.email, d.role)
         except ValueError as ex:
             QMessageBox.warning(self, "Error", str(ex))
             return
 
         self._reload()
+        self.employees_changed.emit()
 
-    def _delete(self, emp_id: int) -> None:
+    def _on_delete(self, emp_id: int) -> None:
         emp = self._repo.get_by_id(emp_id)
         if not emp:
             return
@@ -246,3 +251,4 @@ class EmployeesPage(QWidget):
             return
 
         self._reload()
+        self.employees_changed.emit()

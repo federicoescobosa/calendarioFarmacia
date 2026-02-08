@@ -7,8 +7,7 @@ from pathlib import Path
 
 def _db_path() -> Path:
     """
-    BD en AppData\Local\<App>\data\app.db (Windows).
-    Si prefieres otra ubicación, cambia aquí.
+    BD en AppData\\Local\\CalendarioFarmacia\\data\\app.db (Windows).
     """
     base = Path(os.environ.get("LOCALAPPDATA", ".")) / "CalendarioFarmacia" / "data"
     base.mkdir(parents=True, exist_ok=True)
@@ -22,8 +21,13 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table});")
+    cols = [str(r["name"]) for r in cur.fetchall()]
+    return column in cols
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    # --- Empleados ---
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS employees (
@@ -32,40 +36,78 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             apellido1  TEXT NOT NULL,
             apellido2  TEXT NOT NULL,
             dni        TEXT NOT NULL UNIQUE,
-            is_owner   INTEGER NOT NULL DEFAULT 0
+            is_owner   INTEGER NOT NULL DEFAULT 0,
+            email      TEXT NOT NULL DEFAULT '',
+            role       TEXT NOT NULL DEFAULT 'Empleado'
         );
         """
     )
 
-    # --- Festivos cacheados ---
-    # IMPORTANTE: subdivision_code NO puede ser NULL si lo usamos en PRIMARY KEY.
-    # Usamos '' (cadena vacía) cuando no hay subdivisión.
+    if not _has_column(conn, "employees", "email"):
+        conn.execute("ALTER TABLE employees ADD COLUMN email TEXT NOT NULL DEFAULT '';")
+    if not _has_column(conn, "employees", "role"):
+        conn.execute("ALTER TABLE employees ADD COLUMN role TEXT NOT NULL DEFAULT 'Empleado';")
+
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS holidays (
-            date             TEXT NOT NULL,   -- YYYY-MM-DD
-            name             TEXT NOT NULL,
-            country_code      TEXT NOT NULL,  -- 'ES'
-            subdivision_code  TEXT NOT NULL DEFAULT '', -- '' si no aplica
-            scope             TEXT NOT NULL,  -- 'NATIONAL' | 'REGIONAL' | 'LOCAL'
-            source            TEXT NOT NULL,  -- 'OpenHolidays'
-            fetched_at        TEXT NOT NULL,  -- ISO datetime
-            PRIMARY KEY (date, name, country_code, subdivision_code, scope)
+        CREATE TABLE IF NOT EXISTS employee_allowed_turns (
+            employee_id INTEGER NOT NULL,
+            turn_code   TEXT NOT NULL,
+            PRIMARY KEY (employee_id, turn_code),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
         );
         """
     )
 
-    # --- Control de sincronización por año ---
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS weekly_template (
+            employee_id INTEGER NOT NULL,
+            weekday     INTEGER NOT NULL,
+            turn_code   TEXT NOT NULL,
+            PRIMARY KEY (employee_id, weekday),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schedule (
+            employee_id INTEGER NOT NULL,
+            day         TEXT NOT NULL,
+            turn_code   TEXT NOT NULL,
+            PRIMARY KEY (employee_id, day),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+        """
+    )
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS holiday_sync (
             country_code      TEXT NOT NULL,
-            subdivision_code  TEXT NOT NULL,
+            subdivision_code  TEXT NOT NULL DEFAULT '',
             year              INTEGER NOT NULL,
             synced_at         TEXT NOT NULL,
-            status            TEXT NOT NULL,  -- 'OK' | 'ERROR'
-            error_message     TEXT,
+            status            TEXT NOT NULL,
+            error_message     TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (country_code, subdivision_code, year)
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS holidays (
+            date              TEXT NOT NULL,
+            name              TEXT NOT NULL,
+            country_code      TEXT NOT NULL,
+            subdivision_code  TEXT NOT NULL DEFAULT '',
+            scope             TEXT NOT NULL,
+            source            TEXT NOT NULL,
+            fetched_at        TEXT NOT NULL,
+            PRIMARY KEY (date, country_code, subdivision_code, scope)
         );
         """
     )
