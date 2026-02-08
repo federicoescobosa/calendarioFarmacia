@@ -6,9 +6,12 @@ src/calendario_farmacia.egg-info/SOURCES.txt
 src/calendario_farmacia.egg-info/dependency_links.txt
 src/calendario_farmacia.egg-info/requires.txt
 src/calendario_farmacia.egg-info/top_level.txt
-src/data/__init__.py
-src/data/hardcoded.py
 src/farmacia_app/__init__.py
 src/farmacia_app/main.py
-src/ui/__init__.py
-src/ui/main_window.py
+src/farmacia_app/data/__init__.py
+src/farmacia_app/data/hardcoded.py
+src/farmacia_app/domain/absence_policy.py
+src/farmacia_app/ui/__init__.py
+src/farmacia_app/ui/main_window.py
+src/farmacia_app/ui/rules_dialog.py
+src/farmacia_app/ui/shared.py

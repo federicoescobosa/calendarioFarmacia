@@ -29,6 +29,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from farmacia_app.ui.employees_page import EmployeesPage
+from farmacia_app.ui.rules_dialog import RulesDialog, default_ruleset
+
+# >>> BD
+from farmacia_app.data.db import connect, ensure_schema
+
+# >>> FESTIVOS (SQLite cache)
+from farmacia_app.data.holidays_repository import HolidaysRepository
+
 DAYS = ["L", "M", "X", "J", "V", "S", "D"]
 
 # --- Paleta UI ---
@@ -55,105 +64,52 @@ TURN_DEFS: Dict[str, Dict[str, str]] = {
 TURN_ORDER = ["M1", "M2", "M3", "M4", "M5", "T", "L", "G"]
 
 # --------------------------
-# Ausencias / Permisos (XXV Convenio Oficinas de Farmacia 2022-2024 - Art. 26/27)
+# Ausencias / Permisos
 # --------------------------
-# Art. 27 (permisos):
-# a) Fallecimiento (3 días, 5 con desplazamiento)
-# b) Enfermedad grave/hospitalización/reposo (5 días; 2º afinidad 3 días; puede prorrogarse)
-# c) Matrimonio de hijos/hermanos/padres: 1 día (día de la boda)
-# d) Matrimonio del personal: 20 días
-# e) Tardes 24 y 31 dic + mañana Sábado Santo
-# f) 2 días asuntos propios con restricciones (no acumular a vacaciones/puentes salvo acuerdo; no 2 empleados mismo día salvo acuerdo; preaviso 1 semana salvo fuerza mayor) :contentReference[oaicite:1]{index=1}
-#
-# Art. 26: vacaciones preferentemente mayo-oct; +5 hábiles si no imputable :contentReference[oaicite:2]{index=2}
-
 ABSENCE_DEFS: Dict[str, Dict[str, str]] = {
-    # Vacaciones
     "VAC": {"label": "Vacaciones", "bg": "#E5E7EB", "fg": "#111827"},
-
-    # Art. 27.f
     "AP": {"label": "Asuntos propios (máx 2 días/año)", "bg": "#D1FAE5", "fg": "#065F46"},
-
-    # Bajas (genérico)
     "BAJ": {"label": "Baja médica", "bg": "#FEE2E2", "fg": "#991B1B"},
-
-    # Art. 27.a (separamos para poder limitar)
     "FAL3": {"label": "Fallecimiento familiar (3 días)", "bg": "#FCE7F3", "fg": "#9D174D"},
     "FAL5": {"label": "Fallecimiento familiar + desplazamiento (5 días)", "bg": "#FBCFE8", "fg": "#9D174D"},
-
-    # Art. 27.b (versiones típicas)
     "ENF5": {"label": "Enfermedad grave/hospitalización (5 días)", "bg": "#E0E7FF", "fg": "#3730A3"},
     "ENF3": {"label": "Enfermedad grave 2º afinidad (3 días)", "bg": "#E0E7FF", "fg": "#3730A3"},
-
-    # Art. 27.c / 27.d
     "BOD1": {"label": "Boda hijos/hermanos/padres (1 día)", "bg": "#FEF3C7", "fg": "#92400E"},
     "BOD20": {"label": "Boda del personal (20 días)", "bg": "#FDE68A", "fg": "#92400E"},
-
-    # Art. 27.e
     "PER24D": {"label": "Permiso 24 dic (tarde)", "bg": "#DBEAFE", "fg": "#1D4ED8"},
     "PER31D": {"label": "Permiso 31 dic (tarde)", "bg": "#DBEAFE", "fg": "#1D4ED8"},
     "PERSAB": {"label": "Permiso Sábado Santo (mañana)", "bg": "#DBEAFE", "fg": "#1D4ED8"},
-
-    # Genérico (si necesitas otros del ET más adelante)
     "PER": {"label": "Permiso retribuido (genérico)", "bg": "#EEF2FF", "fg": "#3730A3"},
 }
 
 ABSENCE_ORDER = ["VAC", "AP", "BAJ", "FAL3", "FAL5", "ENF5", "ENF3", "BOD1", "BOD20", "PER24D", "PER31D", "PERSAB", "PER"]
 
-# Reglas de validación por tipo
 ABSENCE_RULES: Dict[str, Dict[str, object]] = {
-    # max_days: máximo de días naturales (FULL) para el permiso
-    # max_per_year_days: máximo por año por empleado (aplica a AP)
-    # forbid_multi_day_half: no permitir AM/PM si es multi-día
     "VAC": {"max_days": None},
     "BAJ": {"max_days": None},
-
     "AP": {"max_per_year_days": 2, "max_days": 2},
-
     "FAL3": {"max_days": 3},
     "FAL5": {"max_days": 5},
     "ENF5": {"max_days": 5},
     "ENF3": {"max_days": 3},
     "BOD1": {"max_days": 1},
     "BOD20": {"max_days": 20},
-
     "PER24D": {"max_days": 1, "forced_part": "PM"},
     "PER31D": {"max_days": 1, "forced_part": "PM"},
     "PERSAB": {"max_days": 1, "forced_part": "AM"},
-
     "PER": {"max_days": None},
 }
 
 
 @dataclass
 class Employee:
+    # Usamos el ID de la BD (string) como "code" interno para el calendario
     code: str
+    # Nombre completo para pintar
     name: str
 
 
 Schedule = dict[str, list[str]]  # employee_code -> 7 valores (L..D)
-
-
-def get_demo_employees() -> List[Employee]:
-    return [
-        Employee(code="A", name="Encarni"),
-        Employee(code="B", name="María"),
-        Employee(code="C", name="Fátima"),
-        Employee(code="D", name="Belén"),
-        Employee(code="E", name="Thalisa"),
-        Employee(code="X", name="Dueño"),
-    ]
-
-
-def get_demo_week_schedule() -> Schedule:
-    return {
-        "A": ["M1", "M1", "M1", "M1", "M1", "L", "L"],
-        "B": ["M2", "M2", "M2", "M2", "M2", "L", "L"],
-        "C": ["M3", "T", "M3", "T", "M3", "L", "L"],
-        "D": ["M5", "T", "M5", "T", "M5", "T", "L"],
-        "E": ["M4", "M4", "M4", "M4", "M4", "T", "L"],
-        "X": ["T", "L", "T", "L", "T", "L", "L"],
-    }
 
 
 @dataclass
@@ -166,10 +122,10 @@ class Coverage:
 @dataclass
 class Absence:
     employee_code: str
-    type_code: str             # VAC, AP, ...
+    type_code: str
     start: date
     end: date
-    part: str                  # "FULL" | "AM" | "PM"
+    part: str  # "FULL" | "AM" | "PM"
     notes: str = ""
 
 
@@ -199,18 +155,37 @@ class TurnDelegate(QStyledItemDelegate):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Farmacia - Calendario semanal (demo hardcode)")
+        self.setWindowTitle("Farmacia - Calendario semanal")
         self.resize(1400, 760)
 
         self._dirty = False
-        self._employees: List[Employee] = get_demo_employees()
-        self._schedule = get_demo_week_schedule()
 
-        # Semana: ahora la controlamos con un datepicker en toolbar (Ir a)
+        # >>> BD (empleados ya vienen de aquí)
+        self._conn = connect()
+        ensure_schema(self._conn)
+
+        # Semana
         self._week_start: date = date(2026, 1, 1)  # demo inicial
 
         # Ausencias en memoria (luego persistimos)
         self._absences: List[Absence] = []
+
+        # Empleados desde BD
+        self._ensure_owner_exists()
+        self._employees: List[Employee] = self._load_employees_from_db()
+
+        # Calendario: de momento NO hay tabla de turnos aún, así que por defecto todo L
+        self._schedule: Schedule = {}  # si no hay clave, se usa L
+
+        # Reglas (en memoria)
+        self._ruleset = default_ruleset(self._employees)
+        self._last_non_rules_row: int = 0
+
+        # >>> FESTIVOS (España + Andalucía)
+        self._holidays = HolidaysRepository()
+        y = date.today().year
+        self._holidays.ensure_year(country_code="ES", subdivision_code="ES-AN", year=y)
+        self._holidays.ensure_year(country_code="ES", subdivision_code="ES-AN", year=y + 1)
 
         # Toolbar
         self._toolbar = QToolBar("Semana")
@@ -223,7 +198,6 @@ class MainWindow(QMainWindow):
         self.lbl_week = QLabel("")
         self.lbl_week.setAlignment(Qt.AlignCenter)
 
-        # Nuevo: selector "Ir a"
         self.lbl_goto = QLabel("Ir a:")
         self.week_picker = QDateEdit()
         self.week_picker.setCalendarPopup(True)
@@ -247,6 +221,51 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_week_header()
         self._load_table()
+
+    # --------------------------
+    # BD - Empleados
+    # --------------------------
+    def _ensure_owner_exists(self) -> None:
+        """
+        Garantiza que en la tabla employees existe el dueño:
+        Nombre: Juan Jose
+        Apellido1: (vacío)
+        Apellido2: (vacío)
+        DNI: OWNER (placeholder)
+        is_owner = 1
+        """
+        cur = self._conn.execute("SELECT id FROM employees WHERE is_owner = 1 LIMIT 1;")
+        row = cur.fetchone()
+        if row is not None:
+            return
+
+        # Si no hay dueño, lo creamos. DNI placeholder único.
+        self._conn.execute(
+            """
+            INSERT INTO employees (nombre, apellido1, apellido2, dni, is_owner)
+            VALUES (?, ?, ?, ?, 1);
+            """,
+            ("Juan Jose", "", "", "OWNER"),
+        )
+        self._conn.commit()
+
+    def _load_employees_from_db(self) -> List[Employee]:
+        cur = self._conn.execute(
+            """
+            SELECT id, nombre, apellido1, apellido2, is_owner
+            FROM employees
+            ORDER BY is_owner DESC, apellido1 ASC, apellido2 ASC, nombre ASC, id ASC;
+            """
+        )
+        employees: List[Employee] = []
+        for r in cur.fetchall():
+            emp_id = str(r["id"])
+            nombre = (r["nombre"] or "").strip()
+            a1 = (r["apellido1"] or "").strip()
+            a2 = (r["apellido2"] or "").strip()
+            full = " ".join([p for p in [nombre, a1, a2] if p])
+            employees.append(Employee(code=emp_id, name=full if full else f"Empleado {emp_id}"))
+        return employees
 
     # --------------------------
     # UI / Navegación
@@ -328,7 +347,7 @@ class MainWindow(QMainWindow):
         self._page_index: Dict[str, int] = {}
 
         self._add_page("Calendario", self._build_calendar_page())
-        self._add_page("Empleados", self._build_placeholder_page("Empleados", "Alta/baja y horas objetivo."))
+        self._add_page("Empleados", EmployeesPage())
         self._add_page("Turnos", self._build_placeholder_page("Turnos", "Catálogo (M1..), colores y chips."))
         self._add_page("Reglas", self._build_placeholder_page("Reglas", "Coberturas, restricciones, preferencias."))
         self._add_page("Ausencias", self._build_absences_page())
@@ -354,11 +373,19 @@ class MainWindow(QMainWindow):
     def _on_nav_changed(self, row: int) -> None:
         if row < 0:
             return
+
+        if row == self._page_index.get("Reglas", -1):
+            self._open_rules()
+            self.sidebar.blockSignals(True)
+            self.sidebar.setCurrentRow(self._last_non_rules_row)
+            self.sidebar.blockSignals(False)
+            return
+
+        self._last_non_rules_row = row
         self._pages.setCurrentIndex(row)
         is_calendar = (row == self._page_index.get("Calendario", 0))
         self._toolbar.setVisible(is_calendar)
 
-        # Al entrar en Ausencias: por UX, ponemos por defecto el inicio/fin al día actual del calendario
         if row == self._page_index.get("Ausencias", -1):
             self.abs_start.blockSignals(True)
             self.abs_end.blockSignals(True)
@@ -367,6 +394,11 @@ class MainWindow(QMainWindow):
             self.abs_end.setMinimumDate(self.abs_start.date())
             self.abs_start.blockSignals(False)
             self.abs_end.blockSignals(False)
+
+    def _open_rules(self) -> None:
+        dlg = RulesDialog(self, employees=self._employees, ruleset=self._ruleset)
+        dlg.exec()
+        self._ruleset = dlg.ruleset()
 
     def _build_placeholder_page(self, title: str, subtitle: str) -> QWidget:
         w = QWidget()
@@ -485,36 +517,11 @@ class MainWindow(QMainWindow):
             chip.setToolTip(d["hours"])
             lay.addWidget(chip)
 
-        lay.addSpacing(14)
-
-        t2 = QLabel("Ausencias:")
-        t2.setStyleSheet("font-weight:600;")
-        lay.addWidget(t2)
-
-        for code in ABSENCE_ORDER:
-            d = ABSENCE_DEFS[code]
-            chip = QLabel(code)
-            chip.setAlignment(Qt.AlignCenter)
-            chip.setStyleSheet(
-                f"""
-                QLabel {{
-                    background: {d['bg']};
-                    color: {d['fg']};
-                    border: 1px solid #cfcfcf;
-                    border-radius: 10px;
-                    padding: 4px 10px;
-                    font-weight: 700;
-                }}
-                """
-            )
-            chip.setToolTip(d["label"])
-            lay.addWidget(chip)
-
         lay.addStretch(1)
         return lay
 
     # --------------------------
-    # Página Ausencias
+    # Página Ausencias (sin cambios relevantes a BD por ahora)
     # --------------------------
     def _build_absences_page(self) -> QWidget:
         page = QWidget()
@@ -524,14 +531,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("Ausencias")
         title.setStyleSheet("font-size: 22px; font-weight: 700;")
-        subtitle = QLabel(
-            "Registra vacaciones, asuntos propios y permisos del convenio (incluye boda: 20 días personal, "
-            "boda familiar 1 día, tardes 24/31 dic, sábado santo mañana)."
-        )
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color:#555; font-size: 13px;")
         root.addWidget(title)
-        root.addWidget(subtitle)
 
         form = QHBoxLayout()
         form.setSpacing(10)
@@ -541,19 +541,16 @@ class MainWindow(QMainWindow):
 
         self.abs_type = QComboBox()
         self.abs_type.addItems([f"{c} - {ABSENCE_DEFS[c]['label']}" for c in ABSENCE_ORDER])
-        self.abs_type.currentIndexChanged.connect(self._on_abs_type_changed)
 
         self.abs_start = QDateEdit()
         self.abs_start.setCalendarPopup(True)
         self.abs_start.setDisplayFormat("dd/MM/yyyy")
         self.abs_start.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-        self.abs_start.dateChanged.connect(self._on_abs_start_changed)
 
         self.abs_end = QDateEdit()
         self.abs_end.setCalendarPopup(True)
         self.abs_end.setDisplayFormat("dd/MM/yyyy")
         self.abs_end.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
-        # CLAVE: no se puede seleccionar fin anterior al inicio
         self.abs_end.setMinimumDate(self.abs_start.date())
 
         self.abs_part = QComboBox()
@@ -601,222 +598,18 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.abs_delete)
         root.addLayout(actions)
 
+        self._absences: List[Absence] = []
         self._refresh_absences_table()
         return page
 
-    def _on_abs_start_changed(self) -> None:
-        # Bloquea fin < inicio
-        self.abs_end.setMinimumDate(self.abs_start.date())
-        if self.abs_end.date() < self.abs_start.date():
-            self.abs_end.setDate(self.abs_start.date())
-
-        # Si el tipo fuerza parte (24/31 dic tarde, etc.), lo re-aplicamos
-        self._on_abs_type_changed()
-
-    def _on_abs_type_changed(self) -> None:
-        code = self.abs_type.currentText().split(" - ", 1)[0].strip()
-        rules = ABSENCE_RULES.get(code, {})
-
-        # Forzar parte si aplica
-        forced_part = rules.get("forced_part")
-        if forced_part == "PM":
-            self.abs_part.setCurrentText("Tarde")
-            self.abs_end.setDate(self.abs_start.date())
-        elif forced_part == "AM":
-            self.abs_part.setCurrentText("Mañana")
-            self.abs_end.setDate(self.abs_start.date())
-
-        # Para permisos de 1 día típicos, si el usuario cambia, dejamos fin = inicio
-        max_days = rules.get("max_days")
-        if isinstance(max_days, int) and max_days == 1:
-            self.abs_end.setDate(self.abs_start.date())
-
     def _add_absence(self) -> None:
-        emp_code = self.abs_emp.currentText().split(" - ", 1)[0].strip()
-        type_code = self.abs_type.currentText().split(" - ", 1)[0].strip()
-
-        start = self._qdate_to_date(self.abs_start.date())
-        end = self._qdate_to_date(self.abs_end.date())
-        if end < start:
-            QMessageBox.warning(self, "Ausencias", "La fecha de fin no puede ser anterior a la de inicio.")
-            return
-
-        part_txt = self.abs_part.currentText()
-        part = "FULL"
-        if part_txt == "Mañana":
-            part = "AM"
-        elif part_txt == "Tarde":
-            part = "PM"
-
-        # Regla: no permitimos AM/PM en rangos de varios días (evita líos)
-        if part != "FULL" and start != end:
-            QMessageBox.warning(self, "Ausencias", "Si eliges Mañana/Tarde debe ser un único día (inicio = fin).")
-            return
-
-        notes = self.abs_notes.text().strip()
-
-        ok, reason = self._validate_absence(
-            Absence(employee_code=emp_code, type_code=type_code, start=start, end=end, part=part, notes=notes)
-        )
-        if not ok:
-            QMessageBox.warning(self, "Ausencias", reason)
-            return
-
-        self._absences.append(Absence(emp_code, type_code, start, end, part, notes))
-        self.abs_notes.clear()
-
-        self._refresh_absences_table()
-        self._load_table()
-
-    def _validate_absence(self, new_abs: Absence) -> tuple[bool, str]:
-        code = new_abs.type_code
-        rules = ABSENCE_RULES.get(code, {})
-
-        # Forzar parte si aplica
-        forced_part = rules.get("forced_part")
-        if forced_part and new_abs.part != forced_part:
-            return False, f"Este tipo de permiso exige parte fija: {'Tarde' if forced_part=='PM' else 'Mañana'}."
-
-        # Max días (si aplica)
-        max_days = rules.get("max_days")
-        days_len = (new_abs.end - new_abs.start).days + 1
-        if isinstance(max_days, int) and days_len > max_days:
-            return False, f"Este permiso no puede superar {max_days} día(s)."
-
-        # AP: no más de 2 días/año (por empleado)
-        if code == "AP":
-            # (simple y útil) no admitimos AP cruzando años
-            if new_abs.start.year != new_abs.end.year:
-                return False, "Asuntos propios debe estar dentro del mismo año."
-
-            # Cuenta días ya pedidos en ese año
-            used = 0.0
-            for a in self._absences:
-                if a.employee_code != new_abs.employee_code or a.type_code != "AP":
-                    continue
-                if a.start.year != new_abs.start.year:
-                    continue
-                used += self._absence_units(a)
-
-            used += self._absence_units(new_abs)
-
-            max_per_year = rules.get("max_per_year_days", 2)
-            if used > float(max_per_year) + 1e-9:
-                return False, f"Asuntos propios: máximo {max_per_year} días/año. Ya llevas {used - self._absence_units(new_abs):g}."
-
-            # Restricción convenio: no 2 empleados el mismo día salvo acuerdo
-            for day in self._iter_days(new_abs.start, new_abs.end):
-                for a in self._absences:
-                    if a.type_code != "AP":
-                        continue
-                    if a.employee_code == new_abs.employee_code:
-                        continue
-                    if a.start <= day <= a.end:
-                        return False, f"Asuntos propios: ya hay otro empleado con AP el {day.strftime('%d/%m/%Y')}."
-
-            # Restricción convenio: no acumular a vacaciones (lo interpretamos como: no pegado a VAC)
-            for a in self._absences:
-                if a.employee_code != new_abs.employee_code:
-                    continue
-                if a.type_code != "VAC":
-                    continue
-                # solapado
-                if not (new_abs.end < a.start or new_abs.start > a.end):
-                    return False, "Asuntos propios no puede solaparse con vacaciones."
-                # pegado (puente con vacaciones)
-                if (new_abs.end + timedelta(days=1)) == a.start or (new_abs.start - timedelta(days=1)) == a.end:
-                    return False, "Asuntos propios no puede ir pegado a vacaciones (salvo acuerdo)."
-
-            # Restricción convenio: preaviso 1 semana (salvo fuerza mayor)
-            # En la app no modelamos “fuerza mayor”, así que lo aplicamos tal cual.
-            today = date.today()
-            if new_abs.start < (today + timedelta(days=7)):
-                return False, "Asuntos propios requiere solicitud con al menos 1 semana de antelación (salvo fuerza mayor)."
-
-        # BOD20: máximo 20 días
-        if code == "BOD20":
-            if days_len > 20:
-                return False, "Boda del personal: máximo 20 días."
-
-        # BOD1: exactamente 1 día (por coherencia)
-        if code == "BOD1" and days_len != 1:
-            return False, "Boda de hijos/hermanos/padres: es 1 día (día de la boda)."
-
-        # PER24D / PER31D: deben ser 24/12 o 31/12
-        if code in ("PER24D", "PER31D"):
-            day = new_abs.start
-            if new_abs.start != new_abs.end:
-                return False, "Este permiso es de un único día."
-            if code == "PER24D" and not (day.day == 24 and day.month == 12):
-                return False, "Este permiso solo aplica el 24/12 (tarde)."
-            if code == "PER31D" and not (day.day == 31 and day.month == 12):
-                return False, "Este permiso solo aplica el 31/12 (tarde)."
-
-        # No duplicar exactamente la misma ausencia (mismo empleado, tipo, fechas, parte)
-        for a in self._absences:
-            if (
-                a.employee_code == new_abs.employee_code
-                and a.type_code == new_abs.type_code
-                and a.start == new_abs.start
-                and a.end == new_abs.end
-                and a.part == new_abs.part
-            ):
-                return False, "Esa ausencia ya existe."
-
-        # No permitir solapes de ausencias en el mismo empleado (simplificación sana)
-        for a in self._absences:
-            if a.employee_code != new_abs.employee_code:
-                continue
-            if not (new_abs.end < a.start or new_abs.start > a.end):
-                return False, "No se permite solapar ausencias en el mismo empleado."
-
-        return True, "OK"
-
-    @staticmethod
-    def _iter_days(start: date, end: date):
-        d = start
-        while d <= end:
-            yield d
-            d += timedelta(days=1)
-
-    @staticmethod
-    def _absence_units(a: Absence) -> float:
-        # FULL = 1 día por día natural. AM/PM = 0.5 (y en esta app solo permitimos 1 día en AM/PM)
-        days_len = (a.end - a.start).days + 1
-        if a.part == "FULL":
-            return float(days_len)
-        return 0.5
+        QMessageBox.information(self, "Ausencias", "Esto sigue en demo. No tocamos más aquí hoy.")
 
     def _delete_selected_absence(self) -> None:
-        row = self.abs_table.currentRow()
-        if row < 0:
-            return
-        try:
-            self._absences.pop(row)
-        except IndexError:
-            return
-        self._refresh_absences_table()
-        self._load_table()
+        return
 
     def _refresh_absences_table(self) -> None:
-        self.abs_table.setRowCount(len(self._absences))
-        base_font = QFont()
-        base_font.setPointSize(11)
-
-        emp_name_by_code = {e.code: e.name for e in self._employees}
-
-        for r, a in enumerate(self._absences):
-            emp = f"{a.employee_code} - {emp_name_by_code.get(a.employee_code, '')}"
-            typ = f"{a.type_code} - {ABSENCE_DEFS.get(a.type_code, {}).get('label', a.type_code)}"
-            ini = a.start.strftime("%d/%m/%Y")
-            fin = a.end.strftime("%d/%m/%Y")
-            parte = {"FULL": "Día completo", "AM": "Mañana", "PM": "Tarde"}.get(a.part, a.part)
-            notes = a.notes
-
-            for c, val in enumerate([emp, typ, ini, fin, parte, notes]):
-                it = QTableWidgetItem(val)
-                it.setFont(base_font)
-                self.abs_table.setItem(r, c, it)
+        self.abs_table.setRowCount(0)
 
     # --------------------------
     # Semana / Fechas
@@ -825,7 +618,6 @@ class MainWindow(QMainWindow):
         end = self._week_start + timedelta(days=6)
         self.lbl_week.setText(f"Semana ({self._week_start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})")
 
-        # sincroniza el picker con el estado actual (sin bucles)
         self.week_picker.blockSignals(True)
         self.week_picker.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
         self.week_picker.blockSignals(False)
@@ -837,7 +629,6 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(headers)
 
     def _on_week_picker_changed(self, qd: QDate) -> None:
-        # Si eliges 04/04 -> esa es la semana base; y navegará desde ahí.
         self._week_start = self._qdate_to_date(qd)
         self._refresh_week_header()
         self._load_table()
@@ -862,9 +653,29 @@ class MainWindow(QMainWindow):
         return date(qd.year(), qd.month(), qd.day())
 
     # --------------------------
+    # FESTIVOS
+    # --------------------------
+    def _is_holiday(self, day: date) -> bool:
+        return self._holidays.is_holiday(day=day, country_code="ES", subdivision_code="ES-AN")
+
+    def _apply_holiday_style(self, item: QTableWidgetItem, day: date) -> None:
+        name = self._holidays.holiday_name(day=day, country_code="ES", subdivision_code="ES-AN") or "Festivo"
+        item.setBackground(QColor("#E6E6E6"))
+        item.setForeground(QColor("#666666"))
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        prev = item.toolTip() or ""
+        item.setToolTip((prev + "\n" if prev else "") + f"Festivo: {name}")
+
+    # --------------------------
     # Datos / Lógica
     # --------------------------
     def _load_table(self) -> None:
+        # Recarga empleados desde BD por si los has creado/borrrado en la pantalla Empleados
+        self._employees = self._load_employees_from_db()
+
+        # Re-sincroniza reglas por si cambia lista de empleados (simple)
+        self._ruleset = default_ruleset(self._employees)
+
         self.table.blockSignals(True)
 
         self.table.setRowCount(len(self._employees))
@@ -872,12 +683,13 @@ class MainWindow(QMainWindow):
         base_font.setPointSize(11)
 
         for r, emp in enumerate(self._employees):
-            name_item = QTableWidgetItem(f"{emp.code} - {emp.name}")
+            name_item = QTableWidgetItem(f"{emp.name}")
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             name_item.setFont(base_font)
             self.table.setItem(r, 0, name_item)
 
             week = self._schedule.get(emp.code, ["L"] * 7)
+
             for c, value in enumerate(week, start=1):
                 v = (value or "L").strip().upper()
                 if v not in TURN_DEFS:
@@ -889,47 +701,27 @@ class MainWindow(QMainWindow):
                 self._apply_turn_style(it, v)
 
                 cell_date = self._week_start + timedelta(days=(c - 1))
-                abs_hit = self._find_absence(emp.code, cell_date)
-                if abs_hit is not None:
-                    self._apply_absence_style(it, abs_hit)
+
+                # Festivo => L forzado
+                if self._is_holiday(cell_date):
+                    it.setText("L")
+                    self._apply_turn_style(it, "L")
+                    self._apply_holiday_style(it, cell_date)
 
                 self.table.setItem(r, c, it)
 
         self.table.blockSignals(False)
         self._update_footer()
 
-    def _find_absence(self, emp_code: str, day: date) -> Optional[Absence]:
-        for a in self._absences:
-            if a.employee_code != emp_code:
-                continue
-            if a.start <= day <= a.end:
-                return a
-        return None
-
     def _apply_turn_style(self, item: QTableWidgetItem, code: str) -> None:
         v = (code or "").strip().upper()
         if v not in TURN_DEFS:
             v = "L"
         d = TURN_DEFS[v]
-
         item.setBackground(QColor(d["bg"]))
         item.setForeground(QColor(d["fg"]))
         item.setToolTip(f"{v} = {d['label']} · {d['hours']}")
         item.setFlags(item.flags() | Qt.ItemIsEditable)
-
-    def _apply_absence_style(self, item: QTableWidgetItem, a: Absence) -> None:
-        d = ABSENCE_DEFS.get(a.type_code, {"label": a.type_code, "bg": "#E5E7EB", "fg": "#111827"})
-        part_txt = {"FULL": "Día completo", "AM": "Mañana", "PM": "Tarde"}.get(a.part, a.part)
-
-        item.setText(a.type_code)
-        item.setBackground(QColor(d["bg"]))
-        item.setForeground(QColor(d["fg"]))
-        tooltip = f"{a.type_code} · {d['label']} · {part_txt}"
-        if a.notes:
-            tooltip += f"\nNotas: {a.notes}"
-        item.setToolTip(tooltip)
-
-        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
     def _compute_coverage(self) -> List[Coverage]:
         cover: List[Coverage] = []
@@ -957,8 +749,17 @@ class MainWindow(QMainWindow):
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == 0:
             return
-
         if not (item.flags() & Qt.ItemIsEditable):
+            return
+
+        cell_date = self._week_start + timedelta(days=(item.column() - 1))
+        if self._is_holiday(cell_date):
+            self.table.blockSignals(True)
+            item.setText("L")
+            self._apply_turn_style(item, "L")
+            self._apply_holiday_style(item, cell_date)
+            self.table.blockSignals(False)
+            QMessageBox.information(self, "Festivo", "No se puede editar un día festivo.")
             return
 
         v = (item.text() or "").strip().upper()
@@ -972,23 +773,14 @@ class MainWindow(QMainWindow):
 
     def _on_save(self) -> None:
         if not self._dirty:
-            self._toast("Nada que guardar (demo).")
+            QMessageBox.information(self, "Info", "Nada que guardar (demo).")
             return
         self._set_dirty(False)
-        self._toast("Guardado (demo).")
+        QMessageBox.information(self, "Info", "Guardado (demo).")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        if self._dirty:
-            res = QMessageBox.question(
-                self,
-                "Salir",
-                "Hay cambios sin guardar (demo). ¿Salir igualmente?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if res == QMessageBox.No:
-                event.ignore()
-                return
+        try:
+            self._conn.close()
+        except Exception:
+            pass
         event.accept()
-
-    def _toast(self, msg: str) -> None:
-        QMessageBox.information(self, "Info", msg)
