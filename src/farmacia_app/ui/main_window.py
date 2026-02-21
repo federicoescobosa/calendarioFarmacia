@@ -5,11 +5,13 @@ from datetime import date, timedelta
 from typing import Dict, List
 
 from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPainter, QPageLayout, QPageSize
+from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from farmacia_app.data.employee_repository import EmployeeRepository, EmployeeRow
+from farmacia_app.data.holidays_repository import HolidaysRepository
 from farmacia_app.data.schedule_repository import ScheduleRepository
 from farmacia_app.data.weekly_template_repository import WeeklyTemplateRepository
 from farmacia_app.ui.employees_page import EmployeesPage
@@ -42,6 +45,10 @@ SURFACE_2 = "#F6F8FB"
 TEXT = "#1F2937"
 TEXT_MUTED = "#6B7280"
 BORDER = "#E5E7EB"
+
+# Festivos (OpenHolidays API)
+HOL_COUNTRY = "ES"
+HOL_SUBDIVISION = "ES-AN"  # Andalucía
 
 
 def _app_version() -> str:
@@ -87,6 +94,24 @@ class TurnDelegate(QStyledItemDelegate):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+
+        # TODOS los botones en rojo (global)
+        self.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #C62828;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 8px 14px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background-color: #B71C1C; }
+            QPushButton:pressed { background-color: #8E0000; }
+            QPushButton:disabled { background-color: #E0E0E0; color: #9E9E9E; }
+            """
+        )
+
         self.setWindowTitle("Farmacia - Calendario semanal")
         self.resize(1400, 760)
 
@@ -94,6 +119,7 @@ class MainWindow(QMainWindow):
         self._employees_repo = EmployeeRepository()
         self._template_repo = WeeklyTemplateRepository()
         self._schedule_repo = ScheduleRepository()
+        self._holidays_repo = HolidaysRepository()
 
         # Estado UI/datos
         self._dirty: bool = False
@@ -105,7 +131,7 @@ class MainWindow(QMainWindow):
         # Para que al pulsar "Reglas" volvamos a la sección anterior
         self._last_non_rules_row: int = 0
 
-        # Toolbar semana
+        # Toolbar semana (solo visible en página Calendario)
         self._toolbar = QToolBar("Semana")
         self.addToolBar(self._toolbar)
 
@@ -151,10 +177,10 @@ class MainWindow(QMainWindow):
     # --------------------------
     def _sync_from_db(self) -> None:
         rows: List[EmployeeRow] = self._employees_repo.list_all()
-        self._employees = [EmployeeVM(id=r.id, name=(r.full_name if r.full_name.strip() else r.nombre)) for r in rows]
+        # compat: algunos repos tienen full_name, otros nombre
+        self._employees = [EmployeeVM(id=r.id, name=(r.full_name if getattr(r, "full_name", "").strip() else r.nombre)) for r in rows]
         self._rebuild_week_turns()
 
-        # Actualizar EmployeesPage si existe
         if hasattr(self, "_employees_page") and isinstance(self._employees_page, EmployeesPage):
             self._employees_page.reload()
 
@@ -170,7 +196,6 @@ class MainWindow(QMainWindow):
             sav = saved.get(eid, [""] * 7)
 
             for i in range(7):
-                # Si hay turno guardado en schedule para ese día, gana.
                 code = (sav[i] or "").strip().upper()
                 if code:
                     week[i] = code if code in TURN_ORDER else "L"
@@ -272,9 +297,9 @@ class MainWindow(QMainWindow):
 
         self._add_page("Turnos", self._build_placeholder_page("Turnos", "Catálogo (M1..), colores y chips."))
         self._add_page("Reglas", self._build_placeholder_page("Reglas", "Plantilla semanal por empleado."))
-        self._add_page("Ausencias", self._build_placeholder_page("Ausencias", "Pendiente (ya lo tienes en otra rama)."))
+        self._add_page("Ausencias", self._build_placeholder_page("Ausencias", "Pendiente."))
         self._add_page("Validación", self._build_placeholder_page("Validación", "Alertas y conflictos accionables."))
-        self._add_page("Exportar", self._build_placeholder_page("Exportar", "PDF / Excel / CSV / ICS."))
+        self._add_page("Exportar", self._build_export_page())
         self._add_page("Ajustes", self._build_placeholder_page("Ajustes", "Parámetros generales."))
 
         self.sidebar.currentRowChanged.connect(self._on_nav_changed)
@@ -296,11 +321,9 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
 
-        # "Reglas" abre diálogo (sin romper menú lateral)
+        # “Reglas” abre un diálogo, no cambia de página
         if row == self._page_index.get("Reglas", -1):
             self._open_rules()
-
-            # Volver a la última sección real (por defecto Calendario).
             self.sidebar.blockSignals(True)
             self.sidebar.setCurrentRow(self._last_non_rules_row)
             self.sidebar.blockSignals(False)
@@ -308,18 +331,17 @@ class MainWindow(QMainWindow):
 
         self._last_non_rules_row = row
         self._pages.setCurrentIndex(row)
+
         is_calendar = (row == self._page_index.get("Calendario", 0))
         self._toolbar.setVisible(is_calendar)
 
     def _open_rules(self) -> None:
         dlg = RulesDialog(self)
         if dlg.exec() == QDialog.Accepted:
-            # Plantilla cambiada -> recalcular semana (si no hay schedule guardado, se verá al instante)
             self._rebuild_week_turns()
             self._load_table()
 
     def _on_employees_changed(self) -> None:
-        # Se añadió/edito/borró en BD -> refrescar todo
         self._sync_from_db()
         self._refresh_week_header()
         self._load_table()
@@ -345,6 +367,180 @@ class MainWindow(QMainWindow):
         lay.addWidget(hint)
         lay.addStretch(1)
         return w
+
+    # --------------------------
+    # Página Exportar (PDF)
+    # --------------------------
+    def _build_export_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        h1 = QLabel("Exportar")
+        h1.setStyleSheet("font-size: 22px; font-weight: 700;")
+        p = QLabel("Genera un PDF del calendario semanal para enviarlo e imprimirlo cuando quieras.")
+        p.setStyleSheet("color:#555; font-size: 13px;")
+        p.setWordWrap(True)
+
+        self._export_info = QLabel("")
+        self._export_info.setStyleSheet("color:#6B7280; font-size: 12px;")
+        self._export_info.setWordWrap(True)
+
+        self.btn_export_pdf = QPushButton("Exportar semana actual a PDF")
+        self.btn_export_pdf.clicked.connect(self._on_export_pdf)
+
+        root.addWidget(h1)
+        root.addWidget(p)
+        root.addSpacing(8)
+        root.addWidget(self.btn_export_pdf)
+        root.addWidget(self._export_info)
+        root.addStretch(1)
+        return page
+
+    def _on_export_pdf(self) -> None:
+        default_name = f"calendario_{self._week_start.strftime('%Y-%m-%d')}.pdf"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar calendario a PDF",
+            default_name,
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path = path + ".pdf"
+
+        try:
+            widget = self._build_pdf_widget()
+            self._render_widget_to_pdf(widget, path)
+            self._export_info.setText(f"PDF generado: {path}")
+            QMessageBox.information(self, "Exportar", "PDF generado correctamente.")
+        except Exception as e:
+            QMessageBox.critical(self, "Exportar", f"No se pudo generar el PDF.\n\nDetalle: {e}")
+
+    def _build_pdf_widget(self) -> QWidget:
+        """
+        Construye un widget SOLO para PDF, replicando estilo:
+        - Título
+        - Leyenda
+        - Tabla con los mismos colores que el calendario
+        """
+        w = QWidget()
+        w.setStyleSheet("background: white;")  # PDF fondo blanco
+
+        root = QVBoxLayout(w)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(10)
+
+        end = self._week_start + timedelta(days=6)
+        title = QLabel(f"Calendario semanal ({self._week_start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})")
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        root.addWidget(title)
+
+        root.addLayout(self._build_legend())
+
+        t = QTableWidget()
+        t.setColumnCount(1 + len(DAYS))
+        t.setRowCount(len(self._employees))
+        t.verticalHeader().setVisible(False)
+        t.setAlternatingRowColors(True)
+        t.setShowGrid(True)
+        t.setStyleSheet(
+            """
+            QTableWidget {
+                gridline-color: #d0d0d0;
+                font-size: 13px;
+            }
+            QHeaderView::section {
+                background: #f5f5f5;
+                padding: 6px;
+                border: 1px solid #d0d0d0;
+                font-weight: 600;
+            }
+            """
+        )
+        h = t.horizontalHeader()
+        h.setSectionResizeMode(QHeaderView.Stretch)
+        h.setStretchLastSection(True)
+
+        # Cabeceras igual que en pantalla (incluye “Festivo” si lo hay)
+        for c in range(self.table.columnCount()):
+            hi = self.table.horizontalHeaderItem(c)
+            label = hi.text() if hi else ("Empleado" if c == 0 else DAYS[c - 1])
+            new_hi = QTableWidgetItem(label)
+            if hi and hi.toolTip():
+                new_hi.setToolTip(hi.toolTip())
+            t.setHorizontalHeaderItem(c, new_hi)
+
+        base_font = QFont()
+        base_font.setPointSize(11)
+
+        for r, emp in enumerate(self._employees):
+            name_item = QTableWidgetItem(emp.name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setFont(base_font)
+            t.setItem(r, 0, name_item)
+
+            week = self._week_turns.get(emp.id, ["L"] * 7)
+            for i in range(7):
+                code = (week[i] or "L").strip().upper()
+                if code not in TURN_DEFS:
+                    code = "L"
+
+                it = QTableWidgetItem(code)
+                it.setTextAlignment(Qt.AlignCenter)
+                it.setFont(base_font)
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+
+                # estilo turno + hint festivo (negrita)
+                self._apply_turn_style(it, code)
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)  # _apply_turn_style marca editable
+                self._apply_holiday_hint_if_needed(item=it, column=i + 1)
+
+                t.setItem(r, i + 1, it)
+
+        t.resizeRowsToContents()
+        root.addWidget(t)
+
+        w.adjustSize()
+        return w
+
+    def _render_widget_to_pdf(self, widget: QWidget, output_path: str) -> None:
+        """
+        Genera PDF. QPrinter aquí se usa SOLO como backend de PDF.
+        No imprime nada.
+        """
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(output_path)
+
+        # Qt6 (PySide6): setOrientation no existe -> setPageOrientation
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+
+        painter = QPainter()
+        if not painter.begin(printer):
+            raise RuntimeError("No se pudo iniciar el motor de PDF (QPrinter).")
+
+        # Compatibilidad: en tu PySide6 pageRect() pide argumento, evitamos pageRect().
+        page = printer.pageLayout().paintRectPixels(printer.resolution())
+
+        widget.resize(widget.sizeHint())
+        w = max(widget.width(), 1)
+        h = max(widget.height(), 1)
+
+        x_scale = page.width() / w
+        y_scale = page.height() / h
+        scale = min(x_scale, y_scale)
+
+        painter.save()
+        painter.translate(page.x(), page.y())
+        painter.scale(scale, scale)
+        widget.render(painter)
+        painter.restore()
+
+        painter.end()
 
     # --------------------------
     # Página Calendario
@@ -444,6 +640,9 @@ class MainWindow(QMainWindow):
     # Semana / Fechas
     # --------------------------
     def _refresh_week_header(self) -> None:
+        # Asegura festivos (si hay internet, los cachea en BD)
+        self._ensure_holidays_loaded_for_visible_week()
+
         end = self._week_start + timedelta(days=6)
         self.lbl_week.setText(f"Semana ({self._week_start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')})")
 
@@ -451,11 +650,18 @@ class MainWindow(QMainWindow):
         self.week_picker.setDate(QDate(self._week_start.year, self._week_start.month, self._week_start.day))
         self.week_picker.blockSignals(False)
 
-        headers = ["Empleado"]
+        # Cabeceras con marcador de festivo
+        self.table.setHorizontalHeaderItem(0, QTableWidgetItem("Empleado"))
         for i, d in enumerate(DAYS):
             day_date = self._week_start + timedelta(days=i)
-            headers.append(f"{d}\n{day_date.strftime('%d/%m')}")
-        self.table.setHorizontalHeaderLabels(headers)
+            txt = f"{d}\n{day_date.strftime('%d/%m')}"
+            name = self._holidays_repo.holiday_name(day=day_date, country_code=HOL_COUNTRY, subdivision_code=HOL_SUBDIVISION)
+            if name:
+                txt = f"{txt}\nFestivo"
+            hi = QTableWidgetItem(txt)
+            if name:
+                hi.setToolTip(f"Festivo: {name}")
+            self.table.setHorizontalHeaderItem(i + 1, hi)
 
     def _on_week_picker_changed(self, qd: QDate) -> None:
         self._week_start = self._qdate_to_date(qd)
@@ -511,9 +717,29 @@ class MainWindow(QMainWindow):
                 it.setTextAlignment(Qt.AlignCenter)
                 it.setFont(base_font)
                 self._apply_turn_style(it, v)
+                self._apply_holiday_hint_if_needed(item=it, column=c)
                 self.table.setItem(r, c, it)
 
         self.table.blockSignals(False)
+
+    def _ensure_holidays_loaded_for_visible_week(self) -> None:
+        years = {self._week_start.year, (self._week_start + timedelta(days=6)).year}
+        for y in sorted(years):
+            self._holidays_repo.ensure_year(country_code=HOL_COUNTRY, subdivision_code=HOL_SUBDIVISION, year=y)
+
+    def _apply_holiday_hint_if_needed(self, *, item: QTableWidgetItem, column: int) -> None:
+        day_date = self._week_start + timedelta(days=column - 1)
+        name = self._holidays_repo.holiday_name(day=day_date, country_code=HOL_COUNTRY, subdivision_code=HOL_SUBDIVISION)
+        if not name:
+            return
+
+        # Negrita + tooltip con festivo (sin tocar colores del turno)
+        f = item.font()
+        f.setBold(True)
+        item.setFont(f)
+        base_tip = item.toolTip() or ""
+        extra = f"Festivo: {name}"
+        item.setToolTip((base_tip + "\n\n" + extra).strip())
 
     def _apply_turn_style(self, item: QTableWidgetItem, code: str) -> None:
         v = (code or "").strip().upper()
@@ -558,7 +784,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Guardar", "No hay cambios que guardar.")
             return
 
-        # Guardamos TODA la semana para cada empleado (schedule = calendario real)
         for emp in self._employees:
             turns = self._week_turns.get(emp.id, ["L"] * 7)
             self._schedule_repo.upsert_week(emp.id, self._week_start, turns)
